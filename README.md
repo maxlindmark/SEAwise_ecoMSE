@@ -25,8 +25,34 @@ devtools::install_github("BernhardKuehn/fast.EOT")
 ```
 ### day 1 - 02. practical on bias-correction
 
-### day 1 - 03. practical on integrating env. uncertainty via BVARs
+- from CRAN:
+```
+install.packages(c("raster","terra","maps",
+                   "reshape2","qmap","ggplot2",
+                   "devtools","parallel","doParallel","foreach"))
+# additionally some packages are already archived on CRAN, so you need to install the last available version
+devtools::install_version("maptools", version = "1.1.8", repos = "http://cran.us.r-project.org")
+devtools::install_version("rgeos", version = "0.6.4", repos = "http://cran.us.r-project.org")
+```
+    from github:
+```
+devtools::install_github("BernhardKuehn/marmalaid")
+```
+day 1 - 03. practical on integrating env. uncertainty via BVARs
 
+- from CRAN:
+```
+install.packages(c("raster","terra","maps","plyr",
+                   "BVAR","scam","mgcv","reshape2",
+                   "devtools","parallel","doParallel","doSnow",
+                   "foreach","funtimes","coda","tsDyn",
+                   "gsignal","FNN","Rcpp","RcppEigen",
+                   "RcppArmadillo","ggplot2","colorspace","patchwork"))
+```
+- from github:
+```
+devtools::install_github("BernhardKuehn/marmalaid")
+```
 ### day 2 - 04. practical on ...
 
 ### day 2 - 05. practical on ...
