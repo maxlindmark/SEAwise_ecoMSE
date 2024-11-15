@@ -409,11 +409,8 @@ Number of model combinations is $combinations = 2^n-1$, and here we have n = `r 
 ```{r fitnessFun}
 fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = TRUE){
 
-  # fmla2 <<- paste(c("rec ~ offset(log(ssb)) + ssb", envvars[as.logical(genes)]), collapse = " + ")
-  # fit <- glm(formula = as.formula(fmla2), data = data, family = gaussian(link = "log"))
-
-  fmla3 <<- paste(c("rec ~ offset(log(ssb)) + ssb", envvars[as.logical(genes)]), collapse = " + ")
-  fit <- glm(formula = fmla3, data = data, family = gaussian(link = "log"))
+  fmlaGA <<- paste(c("rec ~ offset(log(ssb)) + ssb", envvars[as.logical(genes)]), collapse = " + ")
+  fit <- glm(formula = fmlaGA, data = data, family = gaussian(link = "log"))
   
   res <- cvFun(model = fit, nperm = nperm, k = k, seed = ffSeed)
   
