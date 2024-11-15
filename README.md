@@ -4,7 +4,7 @@
 
 Repository for training course material
 
-## Preparation for running MSEs enhanced with environmental data
+## day 3 - 01. Practical on including environmental forcing into stock recruitment in MSE
 
 To prepare for the section where we will run some MSEs with environmentally mediated data, you will need to install and experimental version of smsR in R, and read the WKECOMSE report available on the sharepoint.
 To install smsR directly from Github you need to have the library remotes installed.
@@ -54,9 +54,11 @@ sas <- runAssessment(df.tmb, parms)
 
 ```
 
-And if the run was succesful you can plot the output results easily as
+And if the run was successful you can plot the output results easily as
 
 ```
 plot(sas) # Plots general stock assessment output
 
 ```
+
+This is a fairly simple model that runs without any climatic or other external data, but works as a baseline assessment model. 
