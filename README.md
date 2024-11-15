@@ -34,11 +34,11 @@ install.packages(c("raster","terra","maps",
 devtools::install_version("maptools", version = "1.1.8", repos = "http://cran.us.r-project.org")
 devtools::install_version("rgeos", version = "0.6.4", repos = "http://cran.us.r-project.org")
 ```
-    from github:
+- from github:
 ```
 devtools::install_github("BernhardKuehn/marmalaid")
 ```
-day 1 - 03. practical on integrating env. uncertainty via BVARs
+### day 1 - 03. practical on integrating env. uncertainty via BVARs
 
 - from CRAN:
 ```
