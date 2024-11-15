@@ -29,7 +29,15 @@ devtools::install_github("BernhardKuehn/fast.EOT")
 
 ### day 2 - 04. practical on ...
 
-### day 2 - 05. practical on ...
+### day 2 - 05. practical on model selection
+
+```R
+install.packages(c(
+  "tidyr", "dplyr", "ggplot2", 
+  "patchwork", "knitr",
+  "parallel", "GA", "doRNG",
+  "forecast", "corrplot"))
+```
 
 ### day 3 - 01. Practical on including environmental forcing into stock recruitment in MSE
 

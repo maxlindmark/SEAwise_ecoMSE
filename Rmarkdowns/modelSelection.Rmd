@@ -41,7 +41,9 @@ library(ggplot2)
 library(corrplot)
 library(GA)
 library(patchwork)
+library(doRNG)
 library(knitr)
+library(glmmTMB)
 ```
 
 
@@ -281,17 +283,26 @@ kfold <- function(n, k = NULL){
 # perform repeated k-fold cross validation
 # n and k are passed to kfold; seed is a integer value passed to set.seed
 cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
+  
+  if(any(class(model) %in% "glmmTMB")){
+    modelData <- model$frame
+    y <- model.response(model$frame)
+  }
+  if(any(class(model) %in% "lm")){
+    modelData <- model$data
+    y <- model$y
+  }
   res <- vector("list", nperm)
   set.seed(seed)
   for(j in seq(nperm)){ # for each permutation j
-    ks <- kfold(n = nrow(model$data), k = k)
-    res[[j]] <- data.frame(perm = j, k = NaN, y = model$y, yhat = NaN)
+    ks <- kfold(n = nrow(modelData), k = k)
+    res[[j]] <- data.frame(perm = j, k = NaN, y = y, yhat = NaN)
     for(i in seq(ks)){ # for each partition k
       train <- -ks[[i]]
       valid <- ks[[i]]
-      fit.k <- update(object = model, data = model$data[train,]) # update model with training data
+      fit.k <- update(object = model, data = modelData[train,]) # update model with training data
       res[[j]]$k[valid] <- i
-      res[[j]]$yhat[valid] <- predict(object = fit.k, newdata = model$data[valid,], type = "response")
+      res[[j]]$yhat[valid] <- predict(object = fit.k, newdata = modelData[valid,], type = "response")
     }
   }
   res <- do.call("rbind", res)
@@ -335,13 +346,19 @@ p
 
 ## Model selection
 
-You can compare models of different structure as well...
+You can compare models of different structure as well. 
+For example, AIC may not be comparible between models of different structure, e.g. mixed models with random effects.
+Comparison should be made using same folds (e.g. use of random seed). 
+A variety of metrics could be used for the final model selection.
 
 ```{r cvModelCompare}
 res0 <- cvFun(model = fit0, nperm = 5, k = 5, seed = 1111)
 res <- cvFun(model = fit, nperm = 5, k = 5, seed = 1111)
 
-
+# mixed model with autoregressive term on time (t)
+fmlaMM <- formula(rec ~ ssb + offset(log(ssb)) + x01 + ar1(t + 0 | 1))
+fitMM <- glmmTMB(fmlaMM, data = dat, family = gaussian(link = "log"))
+resMM <- cvFun(model = fitMM, nperm = 5, k = 5, seed = 1111)
 
 
 cvStats0 <- with(res0, c(
@@ -360,15 +377,26 @@ cvStats <- with(res, c(
   mae = mae(y = y, yhat = yhat)
 ))
 
-tmp <- cbind(cvStats0, cvStats)
+cvStatsMM <- with(resMM, c(
+  mse = mse(y = y, yhat = yhat),
+  rmse = rmse(y = y, yhat = yhat),
+  mape = mape(y = y, yhat = yhat),
+  mdape = mdape(y = y, yhat = yhat),
+  mae = mae(y = y, yhat = yhat)
+))
+
+tmp <- cbind(cvStats0, cvStats, cvStatsMM)
 tmp <- as.data.frame(t(apply(tmp, 1, FUN = function(x){
   paste0(format(x, scientific = TRUE, digits = 3), 
     ifelse(x == min(x, na.rm = T), "*", " "))
 })))
 
-names(tmp) <- c("res0", "res")
+names(tmp) <- c("res0", "res", "resMM")
 tmp
 ```
+In this case, the addition of the random intercept with an autoregressive structure based on time (t) did not improve the model for any of the evaluated metrics.
+
+
 
 
 
@@ -417,13 +445,23 @@ if(popSize > length(PARS)){
     FUN = function(x){x[sample(seq(PARS), size = 2)] <- 1; x}))
 }
 
-par(mar = c(1,4,5,1))
-image(list(y = seq(nrow(startPop)), x = seq(ncol(startPop)), z = t(startPop)),
-  ylab = "Individuals", xlab = "", 
-  ylim = rev(range(seq(nrow(startPop)))), xaxt = "n")
-axis(3, at = seq(ncol(startPop)), labels = envvars, las = 2)
-mtext("Covariates (genes)", side = 3, line = 3)
-box()
+tmp <- startPop
+tmp[] <- c("off", "on")[c(tmp)+1]
+df <- as.data.frame(tmp)
+names(df) <- envvars
+df$ind <- seq(nrow(df))
+
+df_long <- df %>%
+  pivot_longer(cols = -ind, names_to = "variable", values_to = "value")
+  
+
+ggplot(df_long, aes(x = variable, y = ind, fill = factor(value))) +
+  geom_tile(colour = 1) +
+  scale_fill_manual(name = "Gene state", values = c("black", "white"), breaks = c("on", "off")) +   # Use color scale (e.g., viridis)
+  scale_y_reverse(expand = c(0, 0)) + 
+  scale_x_discrete(expand = c(0, 0)) +
+  labs(x = "Genes (covariates)", y = "Individuals", title = "Starting population") +
+  theme_bw()
 
 ```
 
@@ -445,11 +483,18 @@ ggplot(tmp) + aes(x = ind, y = fitness, label = covariates) +
 
 ```
 
-
+The fitness of the model with "x01" alone is already a clear standout with highest fitness (lowest mape).
 
 
 
 ### Genetic algorithm
+
+Next, we will provide this starting population to a genetic algorithm (`GA::ga()`) of type "binary", which will turn off/on the covariates, and test the resulting fitness. 
+According to the [vignette of the GA package](https://cran.r-project.org/web/packages/GA/vignettes/GA.html):
+
+> *Genetic algorithms (GAs) are stochastic search algorithms inspired by the basic principles of biological evolution and natural selection. GAs simulate the evolution of living organisms, where the fittest individuals dominate over the weaker ones, by mimicking the biological mechanisms of evolution, such as selection, crossover and mutation.*
+
+Likewise, these aspects can be controlled by the `ga` function with secific arguments, e.g. the probability of gene crossover (`pcrossover`), the probability of mutation (`pmutation`), etc. 
 
 ```{r, geneticAlg}
 # extra diagnostic data object to save all generations
@@ -476,9 +521,9 @@ ga.fit <- ga(
   popSize = popSize, # population size
   pcrossover = 0.8, pmutation = 0.1, elitism = popSize*0.05, # default settings
   parallel = round(parallel::detectCores()/2), # parallel computing using half of available cores
-  maxiter = 50, # max number of generations
-  run = 20, # the max number of generations without any improvement
-  monitor = T, # change to TRUE to monitor fitness evolution
+  maxiter = 100, # max number of generations
+  run = 30, # the max number of generations without any improvement
+  monitor = FALSE, # set to TRUE to monitor fitness evolution
   data = dat, # input data
   seed = 1, # for reproducibility
   postFitness = postfit # extra diagnostics function
