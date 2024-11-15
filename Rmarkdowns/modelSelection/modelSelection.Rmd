@@ -646,6 +646,8 @@ also illustrating different strategies and consequences
 - corrplot: `r packageVersion('corrplot')`
 - GA: `r packageVersion('GA')`
 - knitr: `r packageVersion('knitr')`
+- glmmTMB: `r packageVersion('glmmTMB')`
+- doRNG: `r packageVersion('doRNG')`
 - **Compiled**: `r format(Sys.Date(), '%Y-%b-%d')`
 
 
