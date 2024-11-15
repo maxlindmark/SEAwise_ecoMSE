@@ -50,3 +50,6 @@ rsconnect/
 
 # In case of temporary directory
 /tmp/
+
+/Rmarkdowns/modelSelection_catch/
+/Rmarkdowns/modelSelection_files/
