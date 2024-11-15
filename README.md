@@ -4,11 +4,6 @@
 
 Repository for training course material
 
-
-This is a fairly simple model that runs without any climatic or other external data, but works as a baseline assessment model. 
-=======
-Repository for training course material 
-
 ## R packages that need to be installed beforehand:
 
 In order to save some time during the course, make sure you have the following R-packages installed. We grouped those by each practical/exercise in case you have some troubles installing a few packages, so you could at least follow the other tutorials. 
@@ -93,4 +88,5 @@ plot(sas) # Plots general stock assessment output
 
 ```
 
+This is a fairly simple model that runs without any climatic or other external data, but works as a baseline assessment model. 
 
