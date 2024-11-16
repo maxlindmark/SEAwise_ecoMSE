@@ -17,6 +17,7 @@ output:
     toc_depth: 3
     toc_float:
       collapsed: true
+    self_contained: true
       
 bibliography: modelselection.bib
 ---
@@ -44,6 +45,7 @@ library(patchwork)
 library(doRNG)
 library(knitr)
 library(glmmTMB)
+library(memoise)
 ```
 
 
@@ -68,19 +70,20 @@ Considerations when choosing a "best" model:
 
 # Synthetic data creation
 
+We will generate the data used in the example for simplicity and to gain insight into the model selection process, as we will know the "true" underlying relationship. The example shown here will be to fit an environmentally-mediated stock-recruitment relationship (EMSRR), using a modified Ricker ["controlling"-type as described by @levi_embedding_2003]
+
+First we define some environmental covariates using an autoregressive integrated moving average (ARIMA) model. Here we will model only AR1 processes, which is the degree of correlation of subsequent values based on prior values.
 
 ```{r genCovs}
 set.seed(1235)
 n <- 70
 ncov <- 12
 AR <- runif(ncov, min = 0, max = 0.9) # auto-regression coefficients
-MA <- runif(ncov, min = 0.1, max = 0.5) # moving average coefficients
-MA[sample(ncov, size = ncov*0.5)] <- 0 # set some MA to zero for AR1 process only 
 
 envvars <- paste0("x", formatC(x = seq(ncov), digits = 1, flag = 0))
 tmp <- lapply(seq(ncov), FUN = function(i){
   # Generate the time series
-  ts_data <- arima.sim(model = list(ar = AR[1], ma = MA[i]), n = n)
+  ts_data <- arima.sim(model = list(ar = AR[i]), n = n)
   return(ts_data)
 })
 
@@ -89,14 +92,15 @@ names(tmp) <- envvars
 dat <- cbind(data.frame(t = seq(n)), tmp)
 
 # add a trend to x01 and x02
-dat$x01 <- dat$x01 + sd(dat$x01)*0.02*(dat$t-mean(dat$t)) # 2% of sd per year
-dat$x02 <- dat$x02 + sd(dat$x02)*0.03*(dat$t-mean(dat$t)) # 3% of sd per year
+dat$x01 <- dat$x01 + diff(range(dat$x01))*0.01*(dat$t-mean(dat$t)) # 1% of sd per year
+dat$x02 <- dat$x02 + diff(range(dat$x02))*0.01*(dat$t-mean(dat$t)) # 1% of sd per year
 
 # plot time series
 df <- tidyr::pivot_longer(dat, cols = seq(ncol(dat))[-1])
 ggplot(df) + aes(x = t, y = value, fill = name, color = name) + 
   geom_area(show.legend = F) + 
-  facet_wrap(~ name, ncol = 2)
+  facet_wrap(~ name, ncol = 2) + 
+  theme_bw()
 
 
 ```
@@ -126,11 +130,16 @@ AC
 BC
 "
 
-p <- p1 + p2 + p3 + plot_layout(design = layout, axis_titles = "collect") 
+p <- p1 + p2 + p3 + plot_layout(design = layout, axis_titles = "collect") & 
+  theme_bw()
 p
-# corrplot.mixed(cor(dat[,-1]))
 ```
 
+Correlations
+
+```{r corrPlot}
+corrplot.mixed(cor(dat[,-1]))
+```
 
 
 # Model definition  
@@ -203,7 +212,8 @@ nd$rec <- predict(fit, newdata = nd, type = "response")
 ggplot(dat) + aes(x = ssb, y = rec, col = get(focusVar)) + 
   geom_point() + 
   scale_color_continuous(name = focusVar, type = "viridis") +
-  geom_line(data = nd, mapping = aes(group = get(focusVar)))
+  geom_line(data = nd, mapping = aes(group = get(focusVar))) + 
+  theme_bw()
 ```
 
 
@@ -211,57 +221,57 @@ ggplot(dat) + aes(x = ssb, y = rec, col = get(focusVar)) +
 
 # Cross-validation
 
-- Tests how well a model can predict unseen data (validation)
-- Flexible metrics can be specified depending on the goals of the model
-- 
+- A very flexible framework that tests how well a model can predict independent (unseen) data
+- Data is typically split into two set; one for model fitting (*training data*) and one for prediction (*validation data*)
+- Performance can be evaluated based on the desired metric 
+- Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure) as it can evaluate overfitting
+- Especially prevalent in the contexts of prediction and evaluation of models built on small data sets
 
 
-Cross validation is a very flexible framework that
-
-- Flavours of splitting (random, block, holdout)
-- Metrics for cost function (RMSE, MAE, MdAPE, …)
 
 
-## Metrics
+## Common metrics
 
-More info on pros/cons of different metrics
+Below are some common metrics that could be used for model selection. The choice of metric will depend on the goal of the model prediction. For example, 
+
+Note that these metrics may differ from those by the model's fitting criteria to the training data set. Consistency between the two may be desirable, although one might want to emphasize other aspects of the prediction (validation) data set. 
+
+For example, squared error metrics, like Mean Squared Error ($MSE$) and Root Mean Squared Error ($RMSE$), will more heavily penalize outliers and large errors. Mean Absolute Error $MAE$ an intuitive metric that gives average error in the same units as the data. Mean Absolute Percentage Error ($MAPE$) and  Mean Absolute Scaled Error ($MASE$) provide a scale-independent metric, useful when data varies significantly in magnitude. 
+
+Below are some R functions that can return these metrics, with arguments `y` and `yhat` providing the observed and predicted response values, respectively, of the validation data. 
+
 
 ```{r metricFuns}
 # Mean Squared Error (MSE)
-mse <- function(y, yhat){
-  mean((y - yhat)^2, na.rm = TRUE)
-}
+mse <- function(y, yhat){mean((y - yhat)^2, na.rm = TRUE)}
 
 # Root Mean Squared Error (RMSE)
-rmse <- function(y, yhat){
-  sqrt(mean((y - yhat)^2, na.rm = TRUE))
-}
+rmse <- function(y, yhat){sqrt(mean((y - yhat)^2, na.rm = TRUE))}
 
 # Mean Absolute Percentage Error (MAPE)
-mape <- function(y, yhat){
-  mean(abs(y - yhat) / y, na.rm = TRUE)
-}
+mape <- function(y, yhat){mean(abs(y - yhat) / y, na.rm = TRUE)}
 
 # Median Absolute Percentage Error (MAPE)
-mdape <- function(y, yhat){
-  median(abs(y - yhat) / y, na.rm = TRUE)
-}
+mdape <- function(y, yhat){median(abs(y - yhat) / y, na.rm = TRUE)}
 
 # Mean Absolute Error (MAE)
-mae <- function(y, yhat){
-  mean(abs(y - yhat), na.rm = TRUE)
-}
+mae <- function(y, yhat){mean(abs(y - yhat), na.rm = TRUE)}
 
 # Mean Absolute Scaled Error (MASE)
-mase <- function(y, yhat, yhat_naive){
-  mean(abs(y - yhat), na.rm = TRUE) /
-    mean(abs(y - yhat_naive), na.rm = TRUE)
-}
+mase <- function(y, yhat, yhat_naive){mean(abs(y - yhat), na.rm = TRUE) /
+    mean(abs(y - yhat_naive), na.rm = TRUE)}
 ```
 
 
 ## Repeated k-fold
 
+Many flavors of cross validation exist, but we will focus on one of the most common and flexible ones -- *k-fold cross validation*.
+
+In this approach, the *k* signifies the number of random groupings (i.e. *folds*) to use for the training and validation data. The groups are balanced, such that each data sample will be used once for validation. 
+
+For example, the commonly used 5-fold cross validation divides the data into 5 groups, with each fold using 4 out of 5 of the groups for training (~80\% of data) and the remaining group for validation (~20\% of data).
+
+The number of folds chosen depends on several considerations, such as the variance in the data, data size, and computational cost. A low k (e.g. 5-fold) had typically provides a good balance for the types of models that we have looked at. The larger amount of validation data provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold CV (i.e. multiple permutations) reduces variability in error estimation.
 
 ### Functions
 
@@ -283,15 +293,9 @@ kfold <- function(n, k = NULL){
 # perform repeated k-fold cross validation
 # n and k are passed to kfold; seed is a integer value passed to set.seed
 cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
-  
-  if(any(class(model) %in% "glmmTMB")){
-    modelData <- model$frame
-    y <- model.response(model$frame)
-  }
-  if(any(class(model) %in% "lm")){
-    modelData <- model$data
-    y <- model$y
-  }
+  modelData <- model.frame(model)
+  y <- model.response(model.frame(model))
+  fmla <- formula(model)
   res <- vector("list", nperm)
   set.seed(seed)
   for(j in seq(nperm)){ # for each permutation j
@@ -300,9 +304,13 @@ cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
     for(i in seq(ks)){ # for each partition k
       train <- -ks[[i]]
       valid <- ks[[i]]
-      fit.k <- update(object = model, data = modelData[train,]) # update model with training data
+      # update model with training data
+      fit.k <- update(object = model, data = modelData[train,], 
+        formula = as.formula(fmla, env = environment())) 
+      # predict validation data
+      res[[j]]$yhat[valid] <- predict(object = fit.k, 
+        newdata = modelData[valid,], type = "response")
       res[[j]]$k[valid] <- i
-      res[[j]]$yhat[valid] <- predict(object = fit.k, newdata = modelData[valid,], type = "response")
     }
   }
   res <- do.call("rbind", res)
@@ -313,22 +321,44 @@ cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
 
 ### k-fold partitioning
 
-```{r kfold}
+```{r kfoldExample}
 ks <- kfold(n = nrow(dat), k = 5)
 df <- as.data.frame(do.call("cbind", ks))
 names(df) <- seq(ncol(df))
 
 df <- pivot_longer(df, cols = 1:5)
 df <- df[order(df$value),]
+names(df) <- c("k", "t")
 
-p1 <- ggplot(dat) + aes(x = t, y = 1, col = df$name) + 
+df = merge(dat, df, all = TRUE)
+
+newdat <- data.frame(ssb = seq(0, max(df$ssb), len = 100))
+pred <- vector("list", length(ks))
+for (i in seq_along(ks)) {
+  train <- -ks[[i]]
+  valid <- ks[[i]]
+  fit.k <- update(fit0, data = df[train,], formula = as.formula(fixed_variables, env = environment()))
+  newdat.i <- newdat
+  newdat.i$k <- as.character(i)
+  newdat.i$rec <- predict(fit.k, newdata = newdat.i, type = "response")
+  pred[[i]] <- newdat.i
+}
+pred <- do.call("rbind", pred)
+
+pred$k <- as.character(pred$k)
+df$k <- as.character(df$k)
+
+p1 <- ggplot(df) + aes(x = t, y = 0, col = factor(k)) + 
   geom_point() +
   scale_color_brewer(palette = "Set1", name = "Fold") +
+  labs(y = "") +
+  scale_y_continuous(limits = c(0, 0), breaks = NULL) + 
   theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
     axis.ticks.y = element_blank(), axis.line.y = element_blank())
 
-p2 <- ggplot(dat) + aes(x = ssb, y = rec, col = df$name) + 
+p2 <- ggplot(df) + aes(x = ssb, y = rec, col = factor(k)) + 
   geom_point() +
+  geom_line(data = pred, show.legend = F) +
   lims(x = c(0,NA), y = c(0,NA)) +
   scale_color_brewer(palette = "Set1", name = "Fold")
 
@@ -338,9 +368,48 @@ BB
 BB
 "
 
-p <- p1 + p2 + plot_layout(design = layout, guides = "collect")
+p <- (p1 / p2) + plot_layout(design = layout, guides = "collect") &
+  theme_bw()
+
 p
 
+```
+
+Note that the number of folds will influence the resulting metric of fit to the validation set. The more folds, the closer one gets to the error of the data, with a leave-one-out cross validation (*LOOCV*) being the least biased.
+
+```{r kfoldErrorEst}
+n <- 20
+set.seed(123)
+x <- runif(n, min = 0, max = 40)
+err <- rnorm(n, sd = 15)
+y <- 10 + 2*x + err
+df <- data.frame(x, y)
+fitlm <- lm(y ~ x, df)
+
+res <- data.frame(k = c(round(exp(seq(log(2),log(n/2), len = 10))),n), rmse = NaN, sdResid = NaN)
+for(i in seq(nrow(res))){
+  tmp <- cvFun(model = fitlm, nperm = 50, k = res$k[i], seed = 1)
+  res$rmse[i] <- rmse(y = tmp$y, yhat = tmp$yhat) # sd of residuals
+  res$sdResid[i] <- sd(tmp$y - tmp$yhat) # sd of residuals
+}
+
+p1 <- ggplot(df) + aes(x = x, y = y) + 
+  geom_point() + 
+  geom_abline(intercept = coef(fitlm)[1], slope = coef(fitlm)[2])
+
+p2 <- ggplot(res) + aes(x = k, y = rmse) + 
+  geom_line() + 
+  geom_point() + 
+  geom_hline(yintercept = sqrt(mean(fitlm$residuals^2)), linetype = 2, col = 2) +
+  geom_hline(yintercept = sqrt(mean(err^2)), linetype = 2, col = 4) + 
+  geom_text(x = n/2, y = sqrt(mean(fitlm$residuals^2)), 
+    label = "Model error", col = 2, vjust = -0.25) + 
+  geom_text(x = n/2, y = sqrt(mean(err^2)), 
+    label = "True error", col = 4, vjust = -0.25)
+
+p <- (p1 | p2) & theme_bw()
+p
+  
 ```
 
 
@@ -351,12 +420,13 @@ For example, AIC may not be comparible between models of different structure, e.
 Comparison should be made using same folds (e.g. use of random seed). 
 A variety of metrics could be used for the final model selection.
 
-```{r cvModelCompare}
+```{r cvModelCompare, warning=FALSE}
 res0 <- cvFun(model = fit0, nperm = 5, k = 5, seed = 1111)
 res <- cvFun(model = fit, nperm = 5, k = 5, seed = 1111)
 
 # mixed model with autoregressive term on time (t)
-fmlaMM <- formula(rec ~ ssb + offset(log(ssb)) + x01 + ar1(t + 0 | 1))
+fmlatmp <- formula(fit)
+fmlaMM <- as.formula(paste(c(deparse(fmlatmp), "+ ar1(t + 0 | 1)")))
 fitMM <- glmmTMB(fmlaMM, data = dat, family = gaussian(link = "log"))
 resMM <- cvFun(model = fitMM, nperm = 5, k = 5, seed = 1111)
 
@@ -402,30 +472,32 @@ In this case, the addition of the random intercept with an autoregressive struct
 
 ## Covariate selection with machine learning
 
+[cost function](https://en.wikipedia.org/wiki/Loss_function)
+
 Number of model combinations is $combinations = 2^n-1$, and here we have n = `r length(envvars)`  covariates and `r 2^(length(envvars))-1` possible combinations.
 
 ### Fitness function
 
 ```{r fitnessFun}
-fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = TRUE){
+fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5, 
+  ffSeed = 1, fitnessOnly = TRUE){
 
-  fmlaGA <<- paste(c("rec ~ offset(log(ssb)) + ssb", envvars[as.logical(genes)]), collapse = " + ")
-  fit <- glm(formula = fmlaGA, data = data, family = gaussian(link = "log"))
+  fmla <- as.formula(
+    paste(c("rec ~ offset(log(ssb)) + ssb", envvars[as.logical(genes)]), collapse = " + "), 
+    env = environment())
+  fit <- glm(formula = fmla, data = data, family = gaussian(link = "log"))
   
   res <- cvFun(model = fit, nperm = nperm, k = k, seed = ffSeed)
   
   fitness <- -1 * mape(y = res$y, yhat = res$yhat) # to maximize, so reverse sign 
-  
   if(!fitnessOnly){
     byPerm <- res %>% group_by(perm) %>% summarise(mape = mape(y = y, yhat = yhat))
   }
-
   if(fitnessOnly){
     out <- fitness
   }else{
     out <- list(fitness = fitness, byPerm = byPerm)
   }
-  
   return(out)
 }
 ```
@@ -476,7 +548,8 @@ tmp <- data.frame(ind = seq(tmp1), fitness = tmp1, covariates = tmp2)
 ggplot(tmp) + aes(x = ind, y = fitness, label = covariates) + 
   geom_point() + 
   geom_text(angle = 90, hjust = -0.1, vjust = 0.5) + 
-  scale_y_continuous(expand = expansion(mult = c(0.05,0.25)))
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.25))) + 
+  theme_bw()
 
 ```
 
@@ -493,7 +566,7 @@ According to the [vignette of the GA package](https://cran.r-project.org/web/pac
 
 Likewise, these aspects can be controlled by the `ga` function with secific arguments, e.g. the probability of gene crossover (`pcrossover`), the probability of mutation (`pmutation`), etc. 
 
-```{r, geneticAlg}
+```{r message=FALSE}
 # extra diagnostic data object to save all generations
 postfit <- function(object, ...){
   pop <- as.data.frame(object@population)
@@ -509,6 +582,7 @@ postfit <- function(object, ...){
   object 
 }
 
+mfitnessFun <- memoise(fitnessFun) # a memoised version of the fitness function
 .pop <- NULL # make sure diagnostic output is empty
 ga.fit <- ga(
   type = "binary", # for covariate selection
@@ -519,14 +593,15 @@ ga.fit <- ga(
   pcrossover = 0.8, pmutation = 0.1, elitism = popSize*0.05, # default settings
   parallel = round(parallel::detectCores()/2), # parallel computing using half of available cores
   maxiter = 100, # max number of generations
-  run = 30, # the max number of generations without any improvement
+  run = 40, # the max number of generations without any improvement
   monitor = FALSE, # set to TRUE to monitor fitness evolution
   data = dat, # input data
   seed = 1, # for reproducibility
   postFitness = postfit # extra diagnostics function
 )
+tmp <- forget(mfitnessFun) # to stop memoisation
 
-plot(ga.fit) # plot development
+plot(ga.fit) # plot fitness development
 ```
 
 ### Pareto front
@@ -548,12 +623,14 @@ parFront
 parFront$se <- NaN
 for(i in seq(nrow(parFront))){
   genes.i <- parFront[i,envvars]
-  tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 20, k = 5, ffSeed = 1, fitnessOnly = F)
+  tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = F)
   parFront$se[i] <- sd(tmp$byPerm$mape)/sqrt(nrow(tmp$byPerm))
 }
 
+upr <- parFront$fitness + parFront$se
+lwr <- parFront$fitness - parFront$se
 parFront$best <- FALSE
-hit <- max(which(parFront$fitness > c(-Inf, (parFront$fitness + parFront$se)[-nrow(parFront)])))
+hit <- max(which(lwr > c(-Inf, upr[-nrow(parFront)])))
 parFront$best[hit] <- TRUE
 
 ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) + 
@@ -561,11 +638,13 @@ ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) +
   # scale_color_viridis_c(name = "Iteration", option = "magma", direction = -1) +
   scale_color_continuous(name = "Iteration", type = "viridis", direction = -1) +
   geom_path(data = parFront, color = 4, linetype = 2) +
-  geom_label(data = parFront[1,], color = 1, label = "Naive model", 
-    hjust = -0.25, vjust = 0.5) +
+  geom_label(data = parFront[1,], color = 1, label = "Ricker", 
+    hjust = -0.5, vjust = 0.5) +
   geom_segment(data = parFront, aes(x = -fitness-se, xend = -fitness+se, y = fracVar, yend = fracVar), 
     color = 4, linewidth = 1) +
-  labs(x = "MAPE", y = "Fraction of covariates", title = "Pareto front")
+  geom_text(data = subset(parFront, best), color = "red", label = "*", size = 10, hjust = 1.25) +
+  labs(x = "MAPE", y = "Fraction of environmental covariates", title = "Pareto front") + 
+  theme_bw()
 
 ```
 
@@ -575,15 +654,23 @@ parFront
 ```
 
 
-
-## Random
+```{r bestModel, include=FALSE}
+best <- subset(parFront, best)[envvars]
+best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
+```
+Best model is `r best`.
 
 
 ## Block
 
 To address potential autocorrelation
 
-## Holdout
+```{r determineAutocor}
+acf(dat$rec)
+```
+
+
+## Holdout and naive comparison
 
 The resulting performance metrics from CV with be influenced by the number of folds, blocks etc. chosen, and does not accurately reflect the expected predictive error to new observations.
 
@@ -648,6 +735,7 @@ also illustrating different strategies and consequences
 - knitr: `r packageVersion('knitr')`
 - glmmTMB: `r packageVersion('glmmTMB')`
 - doRNG: `r packageVersion('doRNG')`
+- memoise: `r packageVersion('memoise')`
 - **Compiled**: `r format(Sys.Date(), '%Y-%b-%d')`
 
 
