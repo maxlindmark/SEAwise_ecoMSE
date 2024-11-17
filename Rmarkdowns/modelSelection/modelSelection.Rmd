@@ -46,27 +46,21 @@ library(doRNG)
 library(knitr)
 library(glmmTMB)
 library(memoise)
+library(MuMIn)
 ```
-
-
-
 
 # Introduction
 
 Considerations when choosing a "best" model:
 
-- **We want a model that fits the observed data well**
-- **We want a model that makes biological sense**
-  - Includes plausible covariates, even if the precise mechanism is not known
-- **We want a model that can make good predictions (in the future)**
-  - Especially important in MSE context where forecasts are run
-  - There may be special considerations when covariates extend beyond the observed range
-
-
-
-- Metrics
-  - Internal model metrics (AIC, LogLik)
-
+-   **We want a model that fits the observed data well**
+-   **We want a model that makes biological sense**
+    -   Includes plausible covariates, even if the precise mechanism is not known
+-   **We want a model that can make good predictions (in the future)**
+    -   Especially important in MSE context where forecasts are run
+    -   There may be special considerations when covariates extend beyond the observed range
+-   Metrics
+    -   Internal model metrics (AIC, LogLik)
 
 # Synthetic data creation
 
@@ -74,8 +68,8 @@ We will generate the data used in the example for simplicity and to gain insight
 
 First we define some environmental covariates using an autoregressive integrated moving average (ARIMA) model. Here we will model only AR1 processes, which is the degree of correlation of subsequent values based on prior values.
 
-```{r genCovs}
-set.seed(1235)
+```{r genCovs, fig.height = 6}
+set.seed(1235) # 1235
 n <- 70
 ncov <- 12
 AR <- runif(ncov, min = 0, max = 0.9) # auto-regression coefficients
@@ -99,12 +93,9 @@ dat$x02 <- dat$x02 + diff(range(dat$x02))*0.01*(dat$t-mean(dat$t)) # 1% of sd pe
 df <- tidyr::pivot_longer(dat, cols = seq(ncol(dat))[-1])
 ggplot(df) + aes(x = t, y = value, fill = name, color = name) + 
   geom_area(show.legend = F) + 
-  facet_wrap(~ name, ncol = 2) + 
+  facet_wrap(~ name, ncol = 2, scales = "free_y") + 
   theme_bw()
-
-
 ```
-
 
 Generate ssb and rec
 
@@ -141,8 +132,7 @@ Correlations
 corrplot.mixed(cor(dat[,-1]))
 ```
 
-
-# Model definition  
+# Model definition
 
 [@levi_embedding_2003; @iles_stock_1998; @akimova_spatially-resolved_2016; @iles_review_1994]
 
@@ -159,10 +149,9 @@ fit0 <- glm(fmla, data = dat, family = gaussian(link = "log"))
 summary(fit0)
 ```
 
-## Stepwise search with AIC
+## Stepwise search
 
 Let's compare fit0 and fit with AIC and cross validation metrics
-
 
 ```{r stepwiseRemoval}
 # model with all original variables in fit0
@@ -181,16 +170,34 @@ fit <- step(fit0,
 
 summary(fit)
 c(fit0=AIC(fit0), fit=AIC(fit)) # comparison of AIC
-
-# compare the AIC of 'true' model
-# AIC(update(fit, formula("~ . + x03")))
 ```
 
 Akaike rule-of-thumb for improved model: $\delta AIC \geq 2$
 
 
-## Visualizing marginal effects
 
+## Dredging
+
+If your model fitting is fast, and there are not too many possible combinations ($combinations = 2^n-1$, where n is the number of possible covariaes), then one could try all possible models with the `dredge` function of the package `MuMIn` (*Multi-Model Inference*), which can handle many model types. In our example, it's relatively quick to run through all model types. The function `pdredge` can also parallelize the process. 
+
+```{r dredge}
+fmla <- formula(paste(c("rec ~ offset(log(ssb)) + ssb", envvars), collapse = " + "))
+# argument na.action = na.fail required for fair comparisons
+fittmp <- glm(fmla, data = dat, family = gaussian(link = "log"), na.action = na.fail)
+
+t1 <- Sys.time()
+dd <- dredge(fittmp, fixed = c("offset(log(ssb))", "ssb"), trace = FALSE)
+t2 <- Sys.time()
+# t2 - t1
+
+# subset(dd[1:100,], delta < 4)
+plot(dd[1:100,], labAsExpr = TRUE)
+```
+
+
+
+
+## Visualizing marginal effects
 
 ```{r plotRicker}
 envvarsKeep <- intersect(names(coef(fit)), envvars) # maintained env. covariates
@@ -216,30 +223,24 @@ ggplot(dat) + aes(x = ssb, y = rec, col = get(focusVar)) +
   theme_bw()
 ```
 
+# Cross validation
 
-
-
-# Cross-validation
-
-- A very flexible framework that tests how well a model can predict independent (unseen) data
-- Data is typically split into two set; one for model fitting (*training data*) and one for prediction (*validation data*)
-- Performance can be evaluated based on the desired metric 
-- Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure) as it can evaluate overfitting
-- Especially prevalent in the contexts of prediction and evaluation of models built on small data sets
-
-
+-   Cross validation is a very flexible framework that tests how well a model can predict independent (unseen) data
+-   Data is typically split into two set; one for model fitting (*training data*) and one for prediction (*validation data*)
+-   Performance can be evaluated based on the desired metric
+-   Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure) as it can evaluate overfitting
+-   Especially prevalent in the contexts of prediction and evaluation of models built on small data sets
 
 
 ## Common metrics
 
-Below are some common metrics that could be used for model selection. The choice of metric will depend on the goal of the model prediction. For example, 
+Below are some common metrics that could be used for model selection. The choice of metric will depend on the goal of the model prediction. For example,
 
-Note that these metrics may differ from those by the model's fitting criteria to the training data set. Consistency between the two may be desirable, although one might want to emphasize other aspects of the prediction (validation) data set. 
+Note that these metrics may differ from those by the model's fitting criteria to the training data set. Consistency between the two may be desirable, although one might want to emphasize other aspects of the prediction (validation) data set.
 
-For example, squared error metrics, like Mean Squared Error ($MSE$) and Root Mean Squared Error ($RMSE$), will more heavily penalize outliers and large errors. Mean Absolute Error $MAE$ an intuitive metric that gives average error in the same units as the data. Mean Absolute Percentage Error ($MAPE$) and  Mean Absolute Scaled Error ($MASE$) provide a scale-independent metric, useful when data varies significantly in magnitude. 
+For example, squared error metrics, like Mean Squared Error ($MSE$) and Root Mean Squared Error ($RMSE$), will more heavily penalize outliers and large errors. Mean Absolute Error $MAE$ an intuitive metric that gives average error in the same units as the data. Mean Absolute Percentage Error ($MAPE$) and Mean Absolute Scaled Error ($MASE$) provide a scale-independent metric, useful when data varies significantly in magnitude.
 
-Below are some R functions that can return these metrics, with arguments `y` and `yhat` providing the observed and predicted response values, respectively, of the validation data. 
-
+Below are some R functions that can return these metrics, with arguments `y` and `yhat` providing the observed and predicted response values, respectively, of the validation data.
 
 ```{r metricFuns}
 # Mean Squared Error (MSE)
@@ -262,16 +263,15 @@ mase <- function(y, yhat, yhat_naive){mean(abs(y - yhat), na.rm = TRUE) /
     mean(abs(y - yhat_naive), na.rm = TRUE)}
 ```
 
-
-## Repeated k-fold
+## Flavor 1: Repeated k-fold
 
 Many flavors of cross validation exist, but we will focus on one of the most common and flexible ones -- *k-fold cross validation*.
 
-In this approach, the *k* signifies the number of random groupings (i.e. *folds*) to use for the training and validation data. The groups are balanced, such that each data sample will be used once for validation. 
+In this approach, the *k* signifies the number of random groupings (i.e. *folds*) to use for the training and validation data. The groups are balanced, such that each data sample will be used once for validation.
 
-For example, the commonly used 5-fold cross validation divides the data into 5 groups, with each fold using 4 out of 5 of the groups for training (~80\% of data) and the remaining group for validation (~20\% of data).
+For example, the commonly used 5-fold cross validation divides the data into 5 groups, with each fold using 4 out of 5 of the groups for training (\~80% of data) and the remaining group for validation (\~20% of data).
 
-The number of folds chosen depends on several considerations, such as the variance in the data, data size, and computational cost. A low k (e.g. 5-fold) had typically provides a good balance for the types of models that we have looked at. The larger amount of validation data provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold CV (i.e. multiple permutations) reduces variability in error estimation.
+The number of folds chosen depends on several considerations, such as the variance in the data, data size, and computational cost. A low k (e.g. 5-fold) had typically provides a good balance for the types of models that we have looked at. The larger amount of validation data provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold cross validation (i.e. multiple permutations) reduces variability in error estimation.
 
 ### Functions
 
@@ -280,14 +280,14 @@ The number of folds chosen depends on several considerations, such as the varian
 # n is the number of samples; k is the number of partitions
 kfold <- function(n, k = NULL){
   if(is.null(k)){k <- n} # if undefined, assume leave-one-out (LOO) CV
-  res <- vector(mode="list", k)
+  fold <- vector(mode="list", k)
   n.remain <- seq(n)
   for(i in seq(k)){
     samp <- sample(seq(length(n.remain)), ceiling(length(n.remain)/(k-i+1)))
-    res[[i]] <- n.remain[samp]
+    fold[[i]] <- n.remain[samp]
     n.remain <- n.remain[-samp]
   }
-  return(res)
+  return(fold)
 }
 
 # perform repeated k-fold cross validation
@@ -296,21 +296,23 @@ cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
   modelData <- model.frame(model)
   y <- model.response(model.frame(model))
   fmla <- formula(model)
+  # when k = number of sample, a single leave-one-out cross validation is performed (LOOCV)
+  if(k == length(y)){nperm <- 1} 
   res <- vector("list", nperm)
   set.seed(seed)
   for(j in seq(nperm)){ # for each permutation j
-    ks <- kfold(n = nrow(modelData), k = k)
-    res[[j]] <- data.frame(perm = j, k = NaN, y = y, yhat = NaN)
-    for(i in seq(ks)){ # for each partition k
-      train <- -ks[[i]]
-      valid <- ks[[i]]
+    fold <- kfold(n = nrow(modelData), k = k)
+    res[[j]] <- data.frame(perm = j, fold = NaN, y = y, yhat = NaN)
+    for(i in seq(fold)){ # for each fold
+      train <- -fold[[i]]
+      valid <- fold[[i]]
       # update model with training data
-      fit.k <- update(object = model, data = modelData[train,], 
+      fit.fold <- update(object = model, data = modelData[train,], 
         formula = as.formula(fmla, env = environment())) 
       # predict validation data
-      res[[j]]$yhat[valid] <- predict(object = fit.k, 
+      res[[j]]$yhat[valid] <- predict(object = fit.fold, 
         newdata = modelData[valid,], type = "response")
-      res[[j]]$k[valid] <- i
+      res[[j]]$fold[valid] <- i
     }
   }
   res <- do.call("rbind", res)
@@ -318,49 +320,45 @@ cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
 }
 ```
 
-
 ### k-fold partitioning
 
 ```{r kfoldExample}
-ks <- kfold(n = nrow(dat), k = 5)
-df <- as.data.frame(do.call("cbind", ks))
+fold <- kfold(n = nrow(dat), k = 5)
+df <- as.data.frame(do.call("cbind", fold))
 names(df) <- seq(ncol(df))
 
 df <- pivot_longer(df, cols = 1:5)
 df <- df[order(df$value),]
-names(df) <- c("k", "t")
+names(df) <- c("fold", "t")
 
 df = merge(dat, df, all = TRUE)
 
 newdat <- data.frame(ssb = seq(0, max(df$ssb), len = 100))
-pred <- vector("list", length(ks))
-for (i in seq_along(ks)) {
-  train <- -ks[[i]]
-  valid <- ks[[i]]
-  fit.k <- update(fit0, data = df[train,], formula = as.formula(fixed_variables, env = environment()))
+pred <- vector("list", length(fold))
+for (i in seq_along(fold)) {
+  train <- -fold[[i]]
+  valid <- fold[[i]]
+  fit.fold <- update(fit0, data = df[train,], formula = as.formula(fixed_variables, env = environment()))
   newdat.i <- newdat
-  newdat.i$k <- as.character(i)
-  newdat.i$rec <- predict(fit.k, newdata = newdat.i, type = "response")
+  newdat.i$fold <- as.character(i)
+  newdat.i$rec <- predict(fit.fold, newdata = newdat.i, type = "response")
   pred[[i]] <- newdat.i
 }
 pred <- do.call("rbind", pred)
 
-pred$k <- as.character(pred$k)
-df$k <- as.character(df$k)
-
-p1 <- ggplot(df) + aes(x = t, y = 0, col = factor(k)) + 
+p1 <- ggplot(df) + aes(x = t, y = 0, col = fold) + 
   geom_point() +
-  scale_color_brewer(palette = "Set1", name = "Fold") +
+  scale_color_brewer(name = "Fold", palette = "Set1") +
   labs(y = "") +
   scale_y_continuous(limits = c(0, 0), breaks = NULL) + 
   theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
     axis.ticks.y = element_blank(), axis.line.y = element_blank())
 
-p2 <- ggplot(df) + aes(x = ssb, y = rec, col = factor(k)) + 
+p2 <- ggplot(df) + aes(x = ssb, y = rec, col = fold) + 
   geom_point() +
   geom_line(data = pred, show.legend = F) +
   lims(x = c(0,NA), y = c(0,NA)) +
-  scale_color_brewer(palette = "Set1", name = "Fold")
+  scale_color_brewer(name = "Fold", palette = "Set1")
 
 layout = "
 AA
@@ -370,12 +368,12 @@ BB
 
 p <- (p1 / p2) + plot_layout(design = layout, guides = "collect") &
   theme_bw()
-
-p
-
+print(p)
 ```
 
 Note that the number of folds will influence the resulting metric of fit to the validation set. The more folds, the closer one gets to the error of the data, with a leave-one-out cross validation (*LOOCV*) being the least biased.
+
+In the following example, a simple linear model is evaluated by 
 
 ```{r kfoldErrorEst}
 n <- 20
@@ -408,17 +406,13 @@ p2 <- ggplot(res) + aes(x = k, y = rmse) +
     label = "True error", col = 4, vjust = -0.25)
 
 p <- (p1 | p2) & theme_bw()
-p
+print(p)
   
 ```
 
+## Flexible model selection
 
-## Model selection
-
-You can compare models of different structure as well. 
-For example, AIC may not be comparible between models of different structure, e.g. mixed models with random effects.
-Comparison should be made using same folds (e.g. use of random seed). 
-A variety of metrics could be used for the final model selection.
+You can compare models of different structure as well. For example, AIC may not be comparible between models of different structure, e.g. mixed models with random effects. Comparison should be made using same folds (e.g. use of random seed). A variety of metrics could be used for the final model selection.
 
 ```{r cvModelCompare, warning=FALSE}
 res0 <- cvFun(model = fit0, nperm = 5, k = 5, seed = 1111)
@@ -429,7 +423,6 @@ fmlatmp <- formula(fit)
 fmlaMM <- as.formula(paste(c(deparse(fmlatmp), "+ ar1(t + 0 | 1)")))
 fitMM <- glmmTMB(fmlaMM, data = dat, family = gaussian(link = "log"))
 resMM <- cvFun(model = fitMM, nperm = 5, k = 5, seed = 1111)
-
 
 cvStats0 <- with(res0, c(
   mse = mse(y = y, yhat = yhat),
@@ -464,17 +457,17 @@ tmp <- as.data.frame(t(apply(tmp, 1, FUN = function(x){
 names(tmp) <- c("res0", "res", "resMM")
 tmp
 ```
+
 In this case, the addition of the random intercept with an autoregressive structure based on time (t) did not improve the model for any of the evaluated metrics.
-
-
-
-
 
 ## Covariate selection with machine learning
 
-[cost function](https://en.wikipedia.org/wiki/Loss_function)
+Depending on the number of potential candidate models, the the complexity of the model fitting and cross validation procedures, model selection can become computationally costly. 
 
-Number of model combinations is $combinations = 2^n-1$, and here we have n = `r length(envvars)`  covariates and `r 2^(length(envvars))-1` possible combinations.
+In the example by @kuhn_using_2021, a large number of candidate covariates (n > 80) were chosen based on hypothesized bioloical mechanisms affecting recruitment of North Sea cod. These included time series signals extracted from environmental fields (e.g. principal components from temperature, salinity, and currents) at different temporal periods (and lags). 
+
+The approach used an efficient search algorithm called *Non-dominated sorting genetic algorithm* (NSGA-II) combined with cross validation to explore the large number of potential model configurations. In the following example, we will explore a simplified version of the approach using a genetic algorithm.
+
 
 ### Fitness function
 
@@ -523,17 +516,17 @@ df$ind <- seq(nrow(df))
 df_long <- df %>%
   pivot_longer(cols = -ind, names_to = "variable", values_to = "value")
   
-
 ggplot(df_long, aes(x = variable, y = ind, fill = factor(value))) +
   geom_tile(colour = 1) +
-  scale_fill_manual(name = "Gene state", values = c("black", "white"), breaks = c("on", "off")) +   # Use color scale (e.g., viridis)
+  scale_fill_manual(name = "Gene state", 
+    values = c("black", "white"), breaks = c("on", "off")) +
   scale_y_reverse(expand = c(0, 0)) + 
   scale_x_discrete(expand = c(0, 0)) +
-  labs(x = "Genes (covariates)", y = "Individuals", title = "Starting population") +
+  labs(x = "Genes (covariates)", y = "Individuals", 
+    title = "Starting population") +
   theme_bw()
 
 ```
-
 
 Distribution of fitness for starting population
 
@@ -553,18 +546,15 @@ ggplot(tmp) + aes(x = ind, y = fitness, label = covariates) +
 
 ```
 
-The fitness of the model with "x01" alone is already a clear standout with highest fitness (lowest mape).
-
-
+The fitness of the model with "x01" alone is already a clear standout with high fitness (-MAPE).
 
 ### Genetic algorithm
 
-Next, we will provide this starting population to a genetic algorithm (`GA::ga()`) of type "binary", which will turn off/on the covariates, and test the resulting fitness. 
-According to the [vignette of the GA package](https://cran.r-project.org/web/packages/GA/vignettes/GA.html):
+Next, we will provide this starting population to a genetic algorithm (`GA::ga()`) of type "binary", which will turn off/on the covariates, and test the resulting fitness. According to the [vignette of the GA package](https://cran.r-project.org/web/packages/GA/vignettes/GA.html):
 
 > *Genetic algorithms (GAs) are stochastic search algorithms inspired by the basic principles of biological evolution and natural selection. GAs simulate the evolution of living organisms, where the fittest individuals dominate over the weaker ones, by mimicking the biological mechanisms of evolution, such as selection, crossover and mutation.*
 
-Likewise, these aspects can be controlled by the `ga` function with secific arguments, e.g. the probability of gene crossover (`pcrossover`), the probability of mutation (`pmutation`), etc. 
+Likewise, these aspects can be controlled by the `ga` function with secific arguments, e.g. the probability of gene crossover (`pcrossover`), the probability of mutation (`pmutation`), etc.
 
 ```{r message=FALSE}
 # extra diagnostic data object to save all generations
@@ -584,14 +574,17 @@ postfit <- function(object, ...){
 
 mfitnessFun <- memoise(fitnessFun) # a memoised version of the fitness function
 .pop <- NULL # make sure diagnostic output is empty
+t1 <- Sys.time()
 ga.fit <- ga(
   type = "binary", # for covariate selection
-  fitness = fitnessFun, # fitness function
+  fitness = mfitnessFun, # fitness function
   nBits = length(envvars), # number of genes (covariates)
   suggestions = startPop, # starting population suggestions
   popSize = popSize, # population size
-  pcrossover = 0.8, pmutation = 0.1, elitism = popSize*0.05, # default settings
-  parallel = round(parallel::detectCores()/2), # parallel computing using half of available cores
+  pcrossover = 0.8, # probability of gene crossover
+  pmutation = 0.2,  # probability of mutation
+  elitism = popSize*0.1, # number of best fitness individuals to survive at each generation
+  parallel = FALSE, # set to TRUE for parallel computing (memoisation may be less effective)
   maxiter = 100, # max number of generations
   run = 40, # the max number of generations without any improvement
   monitor = FALSE, # set to TRUE to monitor fitness evolution
@@ -599,12 +592,16 @@ ga.fit <- ga(
   seed = 1, # for reproducibility
   postFitness = postfit # extra diagnostics function
 )
+t2 <- Sys.time()
+# t2 - t1 # elapsed time
 tmp <- forget(mfitnessFun) # to stop memoisation
 
 plot(ga.fit) # plot fitness development
 ```
 
 ### Pareto front
+
+Rules of thumb (Tibshirani)
 
 ```{r paretoPlot}
 .pop$nVar <- rowSums(.pop[,seq(envvars)])
@@ -648,103 +645,344 @@ ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) +
 
 ```
 
-
 ```{r paretoFront}
 parFront
 ```
-
 
 ```{r bestModel, include=FALSE}
 best <- subset(parFront, best)[envvars]
 best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
 ```
-Best model is `r best`.
 
+**Results:**
 
-## Block
+-   Best model is `r best`.
+-   We evaluated a population of `r popSize` individuals for `r max(.pop$iter)` generations, totaling `r nrow(.pop)` fitness evaluations.
+-   Memoisation evaluated `r nrow(unique(.pop[,seq(envvars)]))` unique models, saving us `r paste0(round((1-(nrow(unique(.pop[,seq(envvars)]))/nrow(.pop)))*100), "%")` of fitness evaluations.
+-   Only `r nrow(unique(.pop[,seq(envvars)]))` model configurations out of a total possible `r 2^length(envvars)-1` were evaluated (`r paste0(round(nrow(unique(.pop[,seq(envvars)]))/(2^length(envvars)-1)*100), "%")`).
 
-To address potential autocorrelation
+## Flavor 2: Temporal blocking
 
-```{r determineAutocor}
+To address potential residual autocorrelation
+
+There is autocorrelation evident in the response variable recruitment
+
+```{r acfRec}
 acf(dat$rec)
 ```
 
+But this is largely explained by the covariates considered (e.g. fluctuations in SSB)
 
-## Holdout and naive comparison
+```{r}
+fitRicker <- glm(rec ~ offset(log(ssb)) + ssb, data = dat, gaussian(link = "log"))
+acf(resid(fitRicker))
+```
 
-The resulting performance metrics from CV with be influenced by the number of folds, blocks etc. chosen, and does not accurately reflect the expected predictive error to new observations.
+```{r randomBlocks}
+minSize <- 6
 
-e.g. the RMSE of the validation set will be lower when using a higher number of folds (more training data, less validation)
+blockfold <- function(n, minSize){
+  nBlock <- n %/% minSize # number of blocks
+  leftover <- n %% minSize # remainder
+  blockSize <- rep(minSize, nBlock) # define size of each block
+  if(leftover > 0){ # add any leftovers
+    blockSize <- blockSize + c(rep(1, leftover), rep(0, length(blockSize)-leftover))
+  }
+  blockSize <- sample(blockSize, length(blockSize)) # random shuffle
+  idx <- inverse.rle(list(values = seq(blockSize), lengths = blockSize)) # fold index
+  fold <- split(x = seq(n), idx) # create folds
+  return(fold)
+}
 
-Furthermore, in a typical training / validation CV approach, the model *sees* every data point at least once, which may introduce a bias to expected prediction performance.
+fold <- blockfold(n = nrow(dat), minSize = minSize)
+df <- data.frame(t = dat$t, 
+  fold = inverse.rle(list(values = seq(fold), lengths = sapply(fold, length))))
 
-Thus, a new category of data splitting, the "holdout", defines data that is kept separate of the model selection process, which can then be used to evaluate more realistic prediction performance. In the MSE context, the ability to forecast into the future is desired.
+df = merge(dat, df, all = TRUE)
 
-Finally, the forecast performance on 
+newdat <- data.frame(ssb = seq(0, max(df$ssb), len = 100))
+pred <- vector("list", length(fold))
+for (i in seq_along(fold)) {
+  train <- -fold[[i]]
+  valid <- fold[[i]]
+  fit.fold <- update(fit0, data = df[train,], formula = as.formula(fixed_variables, env = environment()))
+  newdat.i <- newdat
+  newdat.i$fold <- as.character(i)
+  newdat.i$rec <- predict(fit.fold, newdata = newdat.i, type = "response")
+  pred[[i]] <- newdat.i
+}
+pred <- do.call("rbind", pred)
+
+p1 <- ggplot(df) + aes(x = t, y = 0, col = factor(fold)) + 
+  geom_point() +
+  scale_color_brewer(name = "Fold", palette = "Paired") +
+  labs(y = "") +
+  scale_y_continuous(limits = c(0, 0), breaks = NULL) + 
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(), axis.line.y = element_blank())
+
+p2 <- ggplot(df) + aes(x = ssb, y = rec, col = factor(fold)) + 
+  geom_point() +
+  geom_line(data = pred, show.legend = F) +
+  lims(x = c(0,NA), y = c(0,NA)) +
+  scale_color_brewer(name = "Fold", palette = "Paired")
+
+layout = "
+AA
+BB
+BB
+"
+
+p <- (p1 / p2) + plot_layout(design = layout, guides = "collect") &
+  theme_bw()
+print(p)
+
+
+```
+
+
+```{r}
+
+cvFunBlock <- function(model = NULL, minSize = 5, seed = 1){
+  modelData <- model.frame(model)
+  y <- model.response(model.frame(model))
+  fmla <- formula(model)
+  set.seed(seed)
+  fold <- blockfold(n = nrow(modelData), minSize = minSize)
+  res <- data.frame(fold = NaN, y = y, yhat = NaN)
+  for(i in seq(fold)){ # for each fold
+    train <- -fold[[i]]
+    valid <- fold[[i]]
+    # update model with training data
+    fit.fold <- update(object = model, data = modelData[train,], 
+      formula = as.formula(fmla, env = environment())) 
+    # predict validation data
+    res$yhat[valid] <- predict(object = fit.fold, 
+      newdata = modelData[valid,], type = "response")
+    res$fold[valid] <- i
+  }
+  return(res)
+}
+
+res0 <- cvFunBlock(model = fit0, minSize = 6, seed = 1)
+res <- cvFunBlock(model = fit, minSize = 6, seed = 1)
+
+
+cvStats0 <- with(res0, c(
+  mse = mse(y = y, yhat = yhat),
+  rmse = rmse(y = y, yhat = yhat),
+  mape = mape(y = y, yhat = yhat),
+  mdape = mdape(y = y, yhat = yhat),
+  mae = mae(y = y, yhat = yhat)
+))
+
+cvStats <- with(res, c(
+  mse = mse(y = y, yhat = yhat),
+  rmse = rmse(y = y, yhat = yhat),
+  mape = mape(y = y, yhat = yhat),
+  mdape = mdape(y = y, yhat = yhat),
+  mae = mae(y = y, yhat = yhat)
+))
+
+tmp <- cbind(cvStats0, cvStats)
+tmp <- as.data.frame(t(apply(tmp, 1, FUN = function(x){
+  paste0(format(x, scientific = TRUE, digits = 3), 
+    ifelse(x == min(x, na.rm = T), "*", " "))
+})))
+
+names(tmp) <- c("res0", "res")
+tmp
+
+```
 
 
 
-Steps and strategies - Covariate & model selection - Cross
-
-validation strategies - Flavours of splitting (random, block,
-
-holdout) - Metrics for cost function (RMSE, MAE, MdAPE, …) -
-
-Automated covariate selection strategies - Genetic Algorithm -
-
-Identifying parsimonious model - AIC - Pareto front - Rules of
-
-thumb (Tibshirani) - Hindcast cross validation performance -
-
-Relating to holdout CV strategy - Comparison to naive model
-
-(Mean Absolute Scaled Error (MASE))
 
 
-Practical : predictive capability assessment – technical aspects –
+## Flavor 3: Hindcast and naive comparison
 
-also illustrating different strategies and consequences
+Hindcast cross validation performance
 
-
-
-# Caveats
-
-- Predicting outside the observed range
-  - Mechanistic-based models may be more constrained when new covariate values beyond the historical range are used for prediction
-- detrending data
+When future prediction is the focus, you may want to select the validation data more carefully to prevent the model from "*seeing*" the future, which could potentially bias results. One strategy is to again fit the model to the *training* data set, but have two holdout sets of future data: 1. the *validation* set, used for model selection, and 2. the *testing* set for evaluating prediction performance.
 
 
-# Other related topics
-- NSGA-II
-- memoisation
+```{r testHoldout, fig.height=2}
+n <- nrow(dat) # length of time series
+nTest <- 5 # number of test holdout values
+nValid <- 15 # number of test holdout values
+nTrain <- n - nValid - nTest # number of training values
+df <- dat
+df$split <- c(rep("Training", nTrain), rep("Validation", nValid), rep("Testing", nTest))
+df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
+ggplot(df) + aes(x = t, y = 0, col = split) + 
+  geom_point() +
+  scale_color_brewer(name = "Split", palette = "Dark2") +
+  labs(y = "") +
+  scale_y_continuous(limits = c(0, 0), breaks = NULL) + 
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(), axis.line.y = element_blank()) +
+  theme_bw()
+```
+This can also be done in a rolling prediction manner, where the length of the training, validation, and testing sets are defined, and the starting data point can vary through time, within the limits allowed by these set lengths.
 
-[@kuhn_using_2021]
+```{r rollingTestHoldout, fig.height=2}
+n <- nrow(dat) # length of time series
+nTest <- 5 # number of test holdout values
+nValid <- 10 # number of test holdout values
+nTrain <- 45 # number of training values
+res <- vector("list", n)
+for(i in seq(n)){
+  startIdx <- i
+  if((startIdx + nTrain + nValid + nTest - 1) < n){
+    trainIdx <- seq(startIdx, len = nTrain)
+    validIdx <- seq(startIdx + nTrain, len = nValid)
+    testIdx <- seq(startIdx + nTrain + nValid, len = nTest)
+    
+    res[[i]] <- data.frame(split = c(rep("Training", nTrain), rep("Validation", nValid), rep("Testing", nTest)),
+      t = c(trainIdx, validIdx, testIdx), 
+      fold = i)
+  }
+}
+df <- do.call("rbind", res)
+df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
+
+ggplot(df) + aes(x = t, y = fold, col = split) + 
+  geom_point() +
+  scale_color_brewer(name = "Split", palette = "Dark2") +
+  scale_y_reverse() + 
+  theme_bw()
+```
+
+
+
+Finally, it may be useful to compare the prediction performance to some *naive* prediction, such as a men of recent values. The *MASE* metric is of particular use for this kind of forecast comparison.
+
+In our example, since no strong autocorrelation was detected, lets try a k-fold approach for the model selection, leaving out the final 5 years of the data for MASE evaluation versus a naive model.
+
+
+```{r}
+# split data into training/validation & testing
+nTest <- 5
+datTrainValid <- subset(dat, t <= max(t)-nTest)
+datTest <- subset(dat, t > max(t)-nTest)
+
+mfitnessFun <- memoise(fitnessFun) # a memoised version of the fitness function
+.pop <- NULL # make sure diagnostic output is empty
+t1 <- Sys.time()
+ga.fit <- ga(
+  type = "binary", # for covariate selection
+  fitness = mfitnessFun, # fitness function
+  nBits = length(envvars), # number of genes (covariates)
+  suggestions = startPop, # starting population suggestions
+  popSize = popSize, # population size
+  pcrossover = 0.8, # probability of gene crossover
+  pmutation = 0.2,  # probability of mutation
+  elitism = popSize*0.1, # number of best fitness individuals to survive at each generation
+  parallel = FALSE, # set to TRUE for parallel computing (memoisation may be less effective)
+  maxiter = 100, # max number of generations
+  run = 40, # the max number of generations without any improvement
+  monitor = FALSE, # set to TRUE to monitor fitness evolution
+  data = datTrainValid, # input data *** ONLY TRAIN/VALID ***
+  seed = 1, # for reproducibility
+  postFitness = postfit # extra diagnostics function
+)
+t2 <- Sys.time()
+# t2 - t1 # elapsed time
+tmp <- forget(mfitnessFun) # to stop memoisation
+
+.pop$nVar <- rowSums(.pop[,seq(envvars)])
+.pop$fracVar <- .pop$nVar / length(envvars)
+names(.pop)[seq(envvars)] <- envvars
+
+# pareto front
+agg <- aggregate(fitness ~ fracVar, data = .pop, FUN = max)
+
+# determine standard error of pareto front models
+parFront <- merge(x = agg, y = .pop, all.x = T)
+parFront <- unique(parFront[,c(envvars, "nVar", "fracVar", "fitness")])
+parFront <- parFront[order(parFront$nVar),]
+
+parFront$se <- NaN
+for(i in seq(nrow(parFront))){
+  genes.i <- parFront[i,envvars]
+  tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = F)
+  parFront$se[i] <- sd(tmp$byPerm$mape)/sqrt(nrow(tmp$byPerm))
+}
+
+upr <- parFront$fitness + parFront$se
+lwr <- parFront$fitness - parFront$se
+parFront$best <- FALSE
+hit <- max(which(lwr > c(-Inf, upr[-nrow(parFront)])))
+parFront$best[hit] <- TRUE
+best <- subset(parFront, best)[envvars]
+best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
+```
+
+
+The best model is `r best`, which we will then fit again to the full training/valididation data, and predict the testing holdout. The naive model prediction will be the geometric mean of recruitment from the last 10 years.
+
+```{r naiveCompare}
+fmla <- best
+fitBest <- update(fit, data = datTrainValid, 
+  formula = as.formula(fmla, env = environment()))
+yhat <- predict(fitBest, newdata = datTest, type = "response")
+yhat_naive <- rep(exp(mean(log(tail(datTrainValid$rec, 10)))), nrow(datTest))
+MASE <- mase(y = datTest$rec, yhat = yhat, yhat_naive = yhat_naive)
+MASE
+```
+```{r naiveCompare2, fig.height=4}
+df1 <- dat[,c("t", "rec")]
+df1$type = ifelse(df1$t %in% datTrainValid$t, "train/valid", "test")
+df2 <- datTest[,c("t", "rec")]
+df2$rec <- yhat
+df2$type = "model"
+df3 <- datTest[,c("t", "rec")]
+df3$rec <- yhat_naive
+df3$type = "naive"
+df <- rbind(df1, df2, df3)
+df$type <- factor(df$type, levels = c("train/valid", "test", "model", "naive"))
+
+ggplot(df) + aes(x = t, y = rec, colour = type) + 
+  geom_point() + 
+  geom_line() +
+  annotate("text", x = min(df$t), y = max(df$rec), 
+    label = paste("MASE =", round(MASE, 3)), hjust = 0, color = "black") + 
+  scale_color_manual(name = "Data type", 
+    values = c("grey30", "grey", "blue", "green4")) +
+  theme_bw()
+
+```
+
+So, the prediction perfomance is slightly better than the naive prediction (MASE < 1.0), but this might not be strong enough to use in practice. Note that the model was given future SSB and the environmental covariates
+
+
+# Further considerations
+
+-   Predicting outside the observed range
+    -   Mechanistic-based models may be more constrained when new covariate values beyond the historical range are used for prediction
+-   Detrending data?
+-   NSGA-II
 
 
 
 # Software Versions
 
-- `r version$version.string`
-- parallel: `r packageVersion('parallel')`
-- forecast: `r packageVersion('parallel')`
-- tidyr: `r packageVersion('tidyr')`
-- dplyr: `r packageVersion('dplyr')`
-- ggplot2: `r packageVersion('ggplot2')`
-- corrplot: `r packageVersion('corrplot')`
-- GA: `r packageVersion('GA')`
-- knitr: `r packageVersion('knitr')`
-- glmmTMB: `r packageVersion('glmmTMB')`
-- doRNG: `r packageVersion('doRNG')`
-- memoise: `r packageVersion('memoise')`
-- **Compiled**: `r format(Sys.Date(), '%Y-%b-%d')`
-
+-   `r version$version.string`
+-   parallel: `r packageVersion('parallel')`
+-   forecast: `r packageVersion('parallel')`
+-   tidyr: `r packageVersion('tidyr')`
+-   dplyr: `r packageVersion('dplyr')`
+-   ggplot2: `r packageVersion('ggplot2')`
+-   corrplot: `r packageVersion('corrplot')`
+-   GA: `r packageVersion('GA')`
+-   knitr: `r packageVersion('knitr')`
+-   glmmTMB: `r packageVersion('glmmTMB')`
+-   doRNG: `r packageVersion('doRNG')`
+-   memoise: `r packageVersion('memoise')`
+-   **Compiled**: `r format(Sys.Date(), '%Y-%b-%d')`
 
 # Author
 
 **Marc Taylor**. Thünen Institute of Sea Fisheries, Marine Living Resources Unit, Herwigstraße 31, 27572 Bremerhaven, Germany. <https://www.thuenen.de/en/sf/>
 
 # References
-
-
-
-
