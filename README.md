@@ -53,7 +53,17 @@ install.packages(c("raster","terra","maps","plyr",
 ```
 devtools::install_github("BernhardKuehn/marmalaid")
 ```
-### day 2 - 04. practical on ...
+### day 2 - 04. practical on model fitting to growth data
+```R
+install.packages(c(
+  "glmmTMB", "RTMB", 
+  "MuMIn", "bbmle",
+  "broom.mixed",
+  "doParallel", "foreach",
+  "ggplot2", "patchwork"
+  ))
+
+```
 
 ### day 2 - 05. practical on model selection
 
