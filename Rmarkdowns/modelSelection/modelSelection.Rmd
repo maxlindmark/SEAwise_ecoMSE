@@ -34,19 +34,21 @@ knitr::opts_chunk$set(
 # Required packages
 
 ```{r required_packages, message=FALSE, warning=FALSE}
-library(parallel)
-library(forecast)
-library(tidyr)
-library(dplyr)
-library(ggplot2)
+# install.packages(c("corrplot", "doRNG", "dplyr", "forecast", "GA", "ggplot2", "glmmTMB", "knitr", "memoise", "MuMIn", "parallel", "patchwork", "tidyr"))
+
 library(corrplot)
-library(GA)
-library(patchwork)
 library(doRNG)
-library(knitr)
+library(dplyr)
+library(forecast)
+library(GA)
+library(ggplot2)
 library(glmmTMB)
+library(knitr)
 library(memoise)
 library(MuMIn)
+library(parallel)
+library(patchwork)
+library(tidyr)
 ```
 
 # Introduction
@@ -66,10 +68,12 @@ Considerations when choosing a "best" model:
 
 We will generate the data used in the example for simplicity and to gain insight into the model selection process, as we will know the "true" underlying relationship. The example shown here will be to fit an environmentally-mediated stock-recruitment relationship (EMSRR), using a modified Ricker ["controlling"-type as described by @levi_embedding_2003]
 
+## Environmental covariates
+
 First we define some environmental covariates using an autoregressive integrated moving average (ARIMA) model. Here we will model only AR1 processes, which is the degree of correlation of subsequent values based on prior values.
 
 ```{r genCovs, fig.height = 6}
-set.seed(1235) # 1235
+set.seed(1235)
 n <- 70
 ncov <- 12
 AR <- runif(ncov, min = 0, max = 0.9) # auto-regression coefficients
@@ -97,9 +101,11 @@ ggplot(df) + aes(x = t, y = value, fill = name, color = name) +
   theme_bw()
 ```
 
+## Biological covariates and response
+
 Generate ssb and rec
 
-```{r genBio, fig.height=3}
+```{r genBioVars, fig.height=3}
 # generate ssb (random walk)
 set.seed(236)
 dat$ssb <- 30000 - cumsum(rnorm(n, 0, 3000))
@@ -120,23 +126,21 @@ layout <- "
 AC
 BC
 "
-
 p <- p1 + p2 + p3 + plot_layout(design = layout, axis_titles = "collect") & 
   theme_bw()
 p
 ```
 
-Correlations
+## Resulting correlations among variables
 
 ```{r corrPlot}
 corrplot.mixed(cor(dat[,-1]))
 ```
 
-# Model definition
+## Full model definition
 
+Ricker with 
 [@levi_embedding_2003; @iles_stock_1998; @akimova_spatially-resolved_2016; @iles_review_1994]
-
-# Standard metrics to select models
 
 Concept of penalization (degrees of freedom)
 
@@ -148,10 +152,20 @@ fmla
 fit0 <- glm(fmla, data = dat, family = gaussian(link = "log"))
 summary(fit0)
 ```
+# Model selection with Akaike information criterion
+A large part of model building is selecting the best model to describe the response variable. An important concept to remember when looking for the "best" model is whether the addition of terms improves the predictive power of the model. Generally, the more explanatory variables that one has, the more variation will be explained in the response variable, but one has to be careful not to include variables that do not explain a *significant* portion of the variation. The inclusion of these terms might help you achieve a higher $R^2$ value for your specific data set, but are likely to be a poor predictor of new data that was not seen during the fitting. This problem is referred to as "*overfitting*".
+
+The strategy presented here relies on the comparison of "*nested models*" in determining whether a term should be kept or not. Nested models differ by a single term, whereby the larger model contains all of the terms of the smaller model, plus an additional one. One commonly used strategy, is to start with your most complex model (e.g. the model above that included species, petal length, and their interaction) and work backwards, trying to sequentially remove variables that are not significant. 
+
+As a general rule, one should start by removing higher-order terms first (e.g. interaction terms) before moving on main terms or lower-level nested terms. Furthermore, some believe that there is a general rule stating that the main term should always be included if the term is also used in an interaction (see discussion [here](http://stats.stackexchange.com/q/11009/10675)).
+
+This logic is within the automated stepwise search routine found in the function `step()` (introduced below), which usually makes sense, however it is definitely not a hard and fast rule. A basic guideline might be to try and formulate models are plausible given your specific question, and treat the inclusion of terms as hypotheses to be tested (see discussion [here](http://stats.stackexchange.com/q/4901/10675)). 
 
 ## Stepwise search
 
 Let's compare fit0 and fit with AIC and cross validation metrics
+
+By default the `step` function uses a `direction = "backward"` search, which starts with the largest model and removes terms gradually according to the largest improvements in AIC. When `direction = "both"`, terms may come back into the model at later steps. With models of  strategy for term re
 
 ```{r stepwiseRemoval}
 # model with all original variables in fit0
@@ -197,7 +211,9 @@ plot(dd[1:100,], labAsExpr = TRUE)
 
 
 
-## Visualizing marginal effects
+# Visualizing marginal effects
+
+One way to visualize the envitonmental  covariate effects, is to hold all others at their median values, and generate a range of values only for a single focus covariate. 
 
 ```{r plotRicker}
 envvarsKeep <- intersect(names(coef(fit)), envvars) # maintained env. covariates
@@ -223,13 +239,12 @@ ggplot(dat) + aes(x = ssb, y = rec, col = get(focusVar)) +
   theme_bw()
 ```
 
-# Cross validation
+# Model selection via cross validation
 
--   Cross validation is a very flexible framework that tests how well a model can predict independent (unseen) data
--   Data is typically split into two set; one for model fitting (*training data*) and one for prediction (*validation data*)
--   Performance can be evaluated based on the desired metric
--   Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure) as it can evaluate overfitting
--   Especially prevalent in the contexts of prediction and evaluation of models built on small data sets
+- Cross validation is a very flexible framework that tests how well a model can predict independent (unseen) data
+- Data is typically split into two set; one for model fitting (*training data*) and one for prediction (*validation data*)
+- Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure) as it can evaluate overfitting
+- Performance can be evaluated based on the desired metric
 
 
 ## Common metrics
@@ -271,9 +286,14 @@ In this approach, the *k* signifies the number of random groupings (i.e. *folds*
 
 For example, the commonly used 5-fold cross validation divides the data into 5 groups, with each fold using 4 out of 5 of the groups for training (\~80% of data) and the remaining group for validation (\~20% of data).
 
-The number of folds chosen depends on several considerations, such as the variance in the data, data size, and computational cost. A low k (e.g. 5-fold) had typically provides a good balance for the types of models that we have looked at. The larger amount of validation data provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold cross validation (i.e. multiple permutations) reduces variability in error estimation.
+To increase the robustness of the prediction error estimates, the procedure can be repeated a number of times, with fold assignment changing randomly for each permutation.
 
-### Functions
+### Required functions
+
+The following functions will be used in the examples:
+
+- `kfold()` - Randomly partitions the data into the prescribed number of folds (`k`)
+- `cvFun()` - Re-fits a defined model to each of the folds defined by `kfold` and records the observed and predicted response values (inner loop), which can be repeated for a defined number of permutations (`nperm`). The setting of a random `seed` value ensures reproducibility among fold assignments, which is desired when comparing several models. 
 
 ```{r cvFuncions}
 # Determines k-fold partitions for a given number of samples
@@ -320,9 +340,12 @@ cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
 }
 ```
 
-### k-fold partitioning
+### Fitting to each fold
 
-```{r kfoldExample}
+The following figure shows how the data samples in a 5-fold cross validation are randomly assigned to the folds (colors) as validation data sets. For each fold, error is assessed based on the predicted (lines) versus observed (points) from a given fold.
+
+
+```{r kfoldExample, echo=FALSE}
 fold <- kfold(n = nrow(dat), k = 5)
 df <- as.data.frame(do.call("cbind", fold))
 names(df) <- seq(ncol(df))
@@ -371,11 +394,21 @@ p <- (p1 / p2) + plot_layout(design = layout, guides = "collect") &
 print(p)
 ```
 
-Note that the number of folds will influence the resulting metric of fit to the validation set. The more folds, the closer one gets to the error of the data, with a leave-one-out cross validation (*LOOCV*) being the least biased.
 
-In the following example, a simple linear model is evaluated by 
+### Influence of fold number on error
 
-```{r kfoldErrorEst}
+The number of folds chosen depends on several considerations; such as the variance in the data, number of samples, and computational cost. A low k (e.g. 5-fold) typically provides a good balance for the types of models that we have looked at. The larger amount of validation data (20\%) provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold cross validation (i.e. multiple permutations) will further reduce variability in error estimation.
+
+The number of folds will influence the resulting metric of fit to the validation set. The more folds, the closer one gets to the error of the data, with a leave-one-out cross validation (*LOOCV*) being the least biased.
+
+In the following example, a simple linear model is evaluated by repeated 5-fold cross validation. As the number of folds increases, the estimated error approaches the true error. The vertical lines show the standard error around each RMSE estimate, based on the distribution of values from the permutations.
+
+Note that model error (based on residuals) tends to underestimate the true prediction error because it is calculated on the same data used to train the model. This can lead to overfitting, where the model appears to perform better on the training data than it would on unseen data. 
+
+LOOCV provides a *nearly* unbiased estimate of the prediction error because each data point is excluded from the training set when its error is calculated. This does not mean that the underlying model couldn't still suffer from overfitting.
+
+
+```{r kfoldErrorEst, echo=FALSE}
 n <- 20
 set.seed(123)
 x <- runif(n, min = 0, max = 40)
@@ -384,11 +417,13 @@ y <- 10 + 2*x + err
 df <- data.frame(x, y)
 fitlm <- lm(y ~ x, df)
 
-res <- data.frame(k = c(round(exp(seq(log(2),log(n/2), len = 10))),n), rmse = NaN, sdResid = NaN)
+res <- data.frame(k = c(round(exp(seq(log(2),log(n/2), len = 10))),n), rmse = NaN, se = NaN)
 for(i in seq(nrow(res))){
   tmp <- cvFun(model = fitlm, nperm = 50, k = res$k[i], seed = 1)
   res$rmse[i] <- rmse(y = tmp$y, yhat = tmp$yhat) # sd of residuals
-  res$sdResid[i] <- sd(tmp$y - tmp$yhat) # sd of residuals
+  byPerm <- tmp %>% group_by(perm) %>% summarise(rmse = rmse(y = y, yhat = yhat))
+  res$se[i] <- sd(byPerm$rmse)/sqrt(nrow(byPerm))
+  if(res$k[i]==n){ res$se[i] <- 0}
 }
 
 p1 <- ggplot(df) + aes(x = x, y = y) + 
@@ -398,6 +433,8 @@ p1 <- ggplot(df) + aes(x = x, y = y) +
 p2 <- ggplot(res) + aes(x = k, y = rmse) + 
   geom_line() + 
   geom_point() + 
+  geom_segment(mapping = aes(yend = rmse - se)) +
+  geom_segment(mapping = aes(yend = rmse + se)) +
   geom_hline(yintercept = sqrt(mean(fitlm$residuals^2)), linetype = 2, col = 2) +
   geom_hline(yintercept = sqrt(mean(err^2)), linetype = 2, col = 4) + 
   geom_text(x = n/2, y = sqrt(mean(fitlm$residuals^2)), 
@@ -412,7 +449,7 @@ print(p)
 
 ## Flexible model selection
 
-You can compare models of different structure as well. For example, AIC may not be comparible between models of different structure, e.g. mixed models with random effects. Comparison should be made using same folds (e.g. use of random seed). A variety of metrics could be used for the final model selection.
+You can compare models of different structure as well. For example, AIC may not be comparable between models of different structure, e.g. mixed models with random effects. Comparison should be made using same folds (e.g. use of random seed). A variety of metrics could be used for the final model selection.
 
 ```{r cvModelCompare, warning=FALSE}
 res0 <- cvFun(model = fit0, nperm = 5, k = 5, seed = 1111)
@@ -460,16 +497,20 @@ tmp
 
 In this case, the addition of the random intercept with an autoregressive structure based on time (t) did not improve the model for any of the evaluated metrics.
 
-## Covariate selection with machine learning
+# Automated model selection with machine learning
 
-Depending on the number of potential candidate models, the the complexity of the model fitting and cross validation procedures, model selection can become computationally costly. 
+Depending on the number of potential candidate models, as well as the complexity of the model fitting and cross validation procedures, model selection can become computationally costly. Thus, a brute force approach of evaluating all models with cross validation could be unrealistic. 
 
-In the example by @kuhn_using_2021, a large number of candidate covariates (n > 80) were chosen based on hypothesized bioloical mechanisms affecting recruitment of North Sea cod. These included time series signals extracted from environmental fields (e.g. principal components from temperature, salinity, and currents) at different temporal periods (and lags). 
+In the example by @kuhn_using_2021, a large number of candidate covariates (n = 82) were chosen based on hypothesized biological mechanisms affecting recruitment of North Sea cod. These included time series signals extracted from environmental fields (e.g. principal components from temperature, salinity, and currents) at different temporal periods (and lags). 
 
-The approach used an efficient search algorithm called *Non-dominated sorting genetic algorithm* (NSGA-II) combined with cross validation to explore the large number of potential model configurations. In the following example, we will explore a simplified version of the approach using a genetic algorithm.
+The approach used an efficient search algorithm called *non-dominated sorting genetic algorithm* (NSGA-II), combined with cross validation, to explore the large number of potential model configurations (n = `r formatC(2^82, 3)`). 
+
+In the following example, we will explore a simplified version of the approach using a simpler implementation of a genetic algorithm.
 
 
-### Fitness function
+## Fitness function
+
+One starts with a *fitness function*, whose first argument is a binomial vector indicating which covariates to include (i.e. turn on/off) in the model. The main output should be a single value of individual 
 
 ```{r fitnessFun}
 fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5, 
@@ -530,7 +571,6 @@ ggplot(df_long, aes(x = variable, y = ind, fill = factor(value))) +
 
 Distribution of fitness for starting population
 
-### Check fitness of starting pop
 
 ```{r}
 
@@ -548,7 +588,7 @@ ggplot(tmp) + aes(x = ind, y = fitness, label = covariates) +
 
 The fitness of the model with "x01" alone is already a clear standout with high fitness (-MAPE).
 
-### Genetic algorithm
+## Genetic algorithm
 
 Next, we will provide this starting population to a genetic algorithm (`GA::ga()`) of type "binary", which will turn off/on the covariates, and test the resulting fitness. According to the [vignette of the GA package](https://cran.r-project.org/web/packages/GA/vignettes/GA.html):
 
@@ -624,10 +664,14 @@ for(i in seq(nrow(parFront))){
   parFront$se[i] <- sd(tmp$byPerm$mape)/sqrt(nrow(tmp$byPerm))
 }
 
+
 upr <- parFront$fitness + parFront$se
 lwr <- parFront$fitness - parFront$se
+mid <- parFront$fitness
+# check if model fitness is greater than the upper bound of the simpler model
+better <- mid > c(-Inf, upr[-length(lwr)]) 
 parFront$best <- FALSE
-hit <- max(which(lwr > c(-Inf, upr[-nrow(parFront)])))
+hit <- max(which(better))
 parFront$best[hit] <- TRUE
 
 ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) + 
@@ -678,7 +722,7 @@ fitRicker <- glm(rec ~ offset(log(ssb)) + ssb, data = dat, gaussian(link = "log"
 acf(resid(fitRicker))
 ```
 
-```{r randomBlocks}
+```{r randomBlocks, echo=FALSE}
 minSize <- 6
 
 blockfold <- function(n, minSize){
@@ -741,7 +785,7 @@ print(p)
 ```
 
 
-```{r}
+```{r cvStatsBlock, eval=FALSE, include=FALSE}
 
 cvFunBlock <- function(model = NULL, minSize = 5, seed = 1){
   modelData <- model.frame(model)
@@ -799,14 +843,12 @@ tmp
 
 
 
-## Flavor 3: Hindcast and naive comparison
-
-Hindcast cross validation performance
+## Flavor 3: Hindcast preformance
 
 When future prediction is the focus, you may want to select the validation data more carefully to prevent the model from "*seeing*" the future, which could potentially bias results. One strategy is to again fit the model to the *training* data set, but have two holdout sets of future data: 1. the *validation* set, used for model selection, and 2. the *testing* set for evaluating prediction performance.
 
 
-```{r testHoldout, fig.height=2}
+```{r testHoldout, echo=FALSE, fig.height=2}
 n <- nrow(dat) # length of time series
 nTest <- 5 # number of test holdout values
 nValid <- 15 # number of test holdout values
@@ -823,9 +865,10 @@ ggplot(df) + aes(x = t, y = 0, col = split) +
     axis.ticks.y = element_blank(), axis.line.y = element_blank()) +
   theme_bw()
 ```
+
 This can also be done in a rolling prediction manner, where the length of the training, validation, and testing sets are defined, and the starting data point can vary through time, within the limits allowed by these set lengths.
 
-```{r rollingTestHoldout, fig.height=2}
+```{r rollingTestHoldout, echo=FALSE, fig.height=2}
 n <- nrow(dat) # length of time series
 nTest <- 5 # number of test holdout values
 nValid <- 10 # number of test holdout values
@@ -854,13 +897,45 @@ ggplot(df) + aes(x = t, y = fold, col = split) +
 ```
 
 
-
 Finally, it may be useful to compare the prediction performance to some *naive* prediction, such as a men of recent values. The *MASE* metric is of particular use for this kind of forecast comparison.
 
 In our example, since no strong autocorrelation was detected, lets try a k-fold approach for the model selection, leaving out the final 5 years of the data for MASE evaluation versus a naive model.
 
 
-```{r}
+```{r kfoldHindcast, echo=FALSE, fig.height=2}
+n <- nrow(dat) # length of time series
+k = 5
+nTest <- 5 # number of test holdout values
+nTrainValid <- n - nTest
+res <- vector("list", 5)
+ks <- kfold(n = n-nTest, k = 5)
+tmp <- vector("list", k)
+for(i in seq(ks)){
+  df1 <- dat[seq(nTrainValid), c("t","rec")]
+  df2 <- tail(dat[, c("t","rec")], nTest)
+  df1$split <- NA
+  df1$split[-ks[[i]]] <- "Training" 
+  df1$split[ks[[i]]] <- "Validation"
+  df2$split <- "Testing"
+  df <- rbind(df1, df2)
+  df$fold <- i
+  tmp[[i]] <- df
+}
+df <- do.call("rbind", tmp)
+
+df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
+# df$fold <- factor(df$fold)
+ggplot(df) + aes(x = t, y = fold, color = split) + 
+  geom_point() +
+  scale_color_brewer(name = "Split", palette = "Dark2") +
+  scale_y_reverse() + 
+  theme_bw()
+```
+
+
+
+
+```{r hindcast}
 # split data into training/validation & testing
 nTest <- 5
 datTrainValid <- subset(dat, t <= max(t)-nTest)
@@ -919,41 +994,64 @@ best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
 ```
 
 
-The best model is `r best`, which we will then fit again to the full training/valididation data, and predict the testing holdout. The naive model prediction will be the geometric mean of recruitment from the last 10 years.
+The best model is `r best`, which we will then fit again to the full training/validation data, and predict the testing holdout. The naive model prediction will be the geometric mean of recruitment from the last 10 years.
 
 ```{r naiveCompare}
+# refit best model
 fmla <- best
 fitBest <- update(fit, data = datTrainValid, 
   formula = as.formula(fmla, env = environment()))
 yhat <- predict(fitBest, newdata = datTest, type = "response")
-yhat_naive <- rep(exp(mean(log(tail(datTrainValid$rec, 10)))), nrow(datTest))
-MASE <- mase(y = datTest$rec, yhat = yhat, yhat_naive = yhat_naive)
-MASE
+
+# compare to geometric mean
+yhat_naive_gm <- rep(exp(mean(log(tail(datTrainValid$rec, 10)))), nrow(datTest))
+MASE_gm <- mase(y = datTest$rec, yhat = yhat, yhat_naive = yhat_naive_gm)
+
+# compare to non-env Ricker
+fmla <- "rec ~ ssb + offset(log(ssb))"
+fitRicker <- update(fit, data = datTrainValid, 
+  formula = as.formula(fmla, env = environment()))
+yhat_naive_ri <- predict(fitRicker, newdata = datTest, type = "response")
+MASE_ri <- mase(y = datTest$rec, yhat = yhat, yhat_naive = yhat_naive_ri)
 ```
-```{r naiveCompare2, fig.height=4}
+
+
+
+
+```{r naiveCompare2, echo=FALSE, fig.height=4}
 df1 <- dat[,c("t", "rec")]
 df1$type = ifelse(df1$t %in% datTrainValid$t, "train/valid", "test")
 df2 <- datTest[,c("t", "rec")]
 df2$rec <- yhat
 df2$type = "model"
 df3 <- datTest[,c("t", "rec")]
-df3$rec <- yhat_naive
-df3$type = "naive"
-df <- rbind(df1, df2, df3)
-df$type <- factor(df$type, levels = c("train/valid", "test", "model", "naive"))
+df3$rec <- yhat_naive_gm
+df3$type = "Geom. mean (naive)"
+df4 <- datTest[,c("t", "rec")]
+df4$rec <- yhat_naive_ri
+df4$type = "Ricker (naive)"
+
+df <- rbind(df1, df2, df3, df4)
+df$type <- factor(df$type, levels = c("train/valid", "test", "model", "Ricker (naive)", "Geom. mean (naive)"))
 
 ggplot(df) + aes(x = t, y = rec, colour = type) + 
   geom_point() + 
   geom_line() +
   annotate("text", x = min(df$t), y = max(df$rec), 
-    label = paste("MASE =", round(MASE, 3)), hjust = 0, color = "black") + 
+    label = paste("MASE (Ricker) =", round(MASE_ri, 3)), 
+    hjust = 0, color = "orange3") + 
+  annotate("text", x = min(df$t), y = max(df$rec), 
+    label = paste("MASE (Geom. mean) =", round(MASE_gm, 3)), 
+    hjust = 0, vjust = 2, color = "green4") + 
   scale_color_manual(name = "Data type", 
-    values = c("grey30", "grey", "blue", "green4")) +
+    values = c("grey30", "grey", "blue", "orange3", "green4")) +
   theme_bw()
 
 ```
 
-So, the prediction perfomance is slightly better than the naive prediction (MASE < 1.0), but this might not be strong enough to use in practice. Note that the model was given future SSB and the environmental covariates
+So, the prediction performance is slightly better than the naive prediction (MASE < 1.0), but this might not be strong enough to use in practice. Note that the model was given future SSB and the environmental covariates
+
+Short- vs long-term performance (MSE scenario vs STF)
 
 
 # Further considerations
@@ -968,18 +1066,21 @@ So, the prediction perfomance is slightly better than the naive prediction (MASE
 # Software Versions
 
 -   `r version$version.string`
--   parallel: `r packageVersion('parallel')`
--   forecast: `r packageVersion('parallel')`
--   tidyr: `r packageVersion('tidyr')`
--   dplyr: `r packageVersion('dplyr')`
--   ggplot2: `r packageVersion('ggplot2')`
 -   corrplot: `r packageVersion('corrplot')`
--   GA: `r packageVersion('GA')`
--   knitr: `r packageVersion('knitr')`
--   glmmTMB: `r packageVersion('glmmTMB')`
 -   doRNG: `r packageVersion('doRNG')`
+-   dplyr: `r packageVersion('dplyr')`
+-   forecast: `r packageVersion('forecast')`
+-   GA: `r packageVersion('GA')`
+-   ggplot2: `r packageVersion('ggplot2')`
+-   glmmTMB: `r packageVersion('glmmTMB')`
+-   knitr: `r packageVersion('knitr')`
 -   memoise: `r packageVersion('memoise')`
+-   MuMIn: `r packageVersion('MuMIn')`
+-   parallel: `r packageVersion('parallel')`
+-   patchwork: `r packageVersion('patchwork')`
+-   tidyr: `r packageVersion('tidyr')`
 -   **Compiled**: `r format(Sys.Date(), '%Y-%b-%d')`
+
 
 # Author
 
