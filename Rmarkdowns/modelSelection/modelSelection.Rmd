@@ -639,7 +639,7 @@ tmp <- forget(mfitnessFun) # to stop memoisation
 plot(ga.fit) # plot fitness development
 ```
 
-### Pareto front
+## Pareto front
 
 Rules of thumb (Tibshirani)
 
@@ -678,12 +678,12 @@ ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) +
   geom_point(size = 3) + 
   # scale_color_viridis_c(name = "Iteration", option = "magma", direction = -1) +
   scale_color_continuous(name = "Iteration", type = "viridis", direction = -1) +
-  geom_path(data = parFront, color = 4, linetype = 2) +
+  geom_path(data = parFront[better,], color = 4, linetype = 2) +
   geom_label(data = parFront[1,], color = 1, label = "Ricker", 
-    hjust = -0.5, vjust = 0.5) +
+    hjust = 0.5, vjust = -0.5) +
   geom_segment(data = parFront, aes(x = -fitness-se, xend = -fitness+se, y = fracVar, yend = fracVar), 
     color = 4, linewidth = 1) +
-  geom_text(data = subset(parFront, best), color = "red", label = "*", size = 10, hjust = 1.25) +
+  geom_text(data = subset(parFront, best), color = "red", label = "*", size = 10, vjust = 0.25) +
   labs(x = "MAPE", y = "Fraction of environmental covariates", title = "Pareto front") + 
   theme_bw()
 
