@@ -69,10 +69,8 @@ install.packages(c(
 
 ```R
 install.packages(c(
-  "tidyr", "dplyr", "ggplot2", 
-  "patchwork", "knitr",
-  "parallel", "GA", "doRNG",
-  "forecast", "corrplot"))
+  "corrplot", "doRNG", "dplyr", "forecast", "GA", "ggplot2", 
+  "glmmTMB", "knitr", "memoise", "MuMIn", "parallel", "patchwork", "tidyr"))
 ```
 
 ### day 3 - 01. Practical on including environmental forcing into stock recruitment in MSE
