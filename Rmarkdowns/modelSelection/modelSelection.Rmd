@@ -525,12 +525,13 @@ fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5,
   
   fitness <- -1 * mape(y = res$y, yhat = res$yhat) # to maximize, so reverse sign 
   if(!fitnessOnly){
-    byPerm <- res %>% group_by(perm) %>% summarise(mape = mape(y = y, yhat = yhat))
+    byGroup <- res %>% group_by(perm) %>% summarise(mape = mape(y = y, yhat = yhat))
+    se <- sd(byGroup$mape)/sqrt(nrow(byGroup))
   }
   if(fitnessOnly){
     out <- fitness
   }else{
-    out <- list(fitness = fitness, byPerm = byPerm)
+    out <- list(fitness = fitness, byGroup = byGroup, se = se)
   }
   return(out)
 }
@@ -661,7 +662,7 @@ parFront$se <- NaN
 for(i in seq(nrow(parFront))){
   genes.i <- parFront[i,envvars]
   tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = F)
-  parFront$se[i] <- sd(tmp$byPerm$mape)/sqrt(nrow(tmp$byPerm))
+  parFront$se[i] <- tmp$se
 }
 
 
@@ -858,7 +859,7 @@ df$split <- c(rep("Training", nTrain), rep("Validation", nValid), rep("Testing",
 df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
 ggplot(df) + aes(x = t, y = 0, col = split) + 
   geom_point() +
-  scale_color_brewer(name = "Split", palette = "Dark2") +
+  scale_color_brewer(name = "Split", palette = "Set2") +
   labs(y = "") +
   scale_y_continuous(limits = c(0, 0), breaks = NULL) + 
   theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
@@ -891,7 +892,7 @@ df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
 
 ggplot(df) + aes(x = t, y = fold, col = split) + 
   geom_point() +
-  scale_color_brewer(name = "Split", palette = "Dark2") +
+  scale_color_brewer(name = "Split", palette = "Set2") +
   scale_y_reverse() + 
   theme_bw()
 ```
@@ -927,7 +928,7 @@ df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
 # df$fold <- factor(df$fold)
 ggplot(df) + aes(x = t, y = fold, color = split) + 
   geom_point() +
-  scale_color_brewer(name = "Split", palette = "Dark2") +
+  scale_color_brewer(name = "Split", palette = "Set2") +
   scale_y_reverse() + 
   theme_bw()
 ```
@@ -976,18 +977,23 @@ agg <- aggregate(fitness ~ fracVar, data = .pop, FUN = max)
 parFront <- merge(x = agg, y = .pop, all.x = T)
 parFront <- unique(parFront[,c(envvars, "nVar", "fracVar", "fitness")])
 parFront <- parFront[order(parFront$nVar),]
+parFront
 
 parFront$se <- NaN
 for(i in seq(nrow(parFront))){
   genes.i <- parFront[i,envvars]
   tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = F)
-  parFront$se[i] <- sd(tmp$byPerm$mape)/sqrt(nrow(tmp$byPerm))
+  parFront$se[i] <- tmp$se
 }
+
 
 upr <- parFront$fitness + parFront$se
 lwr <- parFront$fitness - parFront$se
+mid <- parFront$fitness
+# check if model fitness is greater than the upper bound of the simpler model
+better <- mid > c(-Inf, upr[-length(lwr)]) 
 parFront$best <- FALSE
-hit <- max(which(lwr > c(-Inf, upr[-nrow(parFront)])))
+hit <- max(which(better))
 parFront$best[hit] <- TRUE
 best <- subset(parFront, best)[envvars]
 best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
