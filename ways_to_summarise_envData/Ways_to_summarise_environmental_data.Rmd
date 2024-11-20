@@ -1,0 +1,458 @@
+---
+title: "Ways to summarise spatio-temporal environmental data"
+author: "Bernhard Kuehn"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+bibliography: Ways_to_summarise_environmental_data.bib
+biblio-style: "apalike"
+link-citations: true
+output:
+  html_document:
+    toc: true
+    theme: united 
+    df_print: paged
+
+---
+
+```{r setup, include=FALSE}
+# extract all R-code-chunks and write to R-Script
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(hide = TRUE, message = FALSE,
+                      warning = FALSE,results = FALSE)
+```
+
+## Introduction
+
+To explicitly incorporate environmental information in fisheries models (e.g. used for MSE-simulations), one has to decide which variables one would like to consider. Many different products are out there - often in the form of gridded spatio-temporal data. Rather than discussing in detail which product to use, this tutorial should focus on the different methods one could use to **summarise those spatio-temporal data to get environmental time series** that match the lifecycle of the species/stock of interest. Ideally this choice is **first a hypothesis-driven decision**, selecting the environmental variable itself as well as the appropriate spatio-temporal scale that likely influences the biological process of interest (e.g. recruitment or growth).
+
+With this in mind, the problem boils down to a **dimension reduction** - going from the high-dimensional spatio-temporal field (3D) to a more manageable low-dimension time series (2D). All of these algorithms perform some sort of aggregation on the data, either in the form of spatial-averaging or clustering in an informed or more uninformed (data-driven) approach.
+
+Here we want to spotlight some potential algorithms to use, discuss their differences and pros/cons. 
+
+We apply all analysis having an example stock in mind: North Sea cod, therefore matching our spatial extraction methods to the spatial extent of the stock or specific regions of interest (e.g. spawning areas). 
+
+## Required packages to run this tutorial 
+
+In order to execute the code in this tutorial you should have the following packages installed:
+
+- CRAN: [raster](https://cran.r-project.org/web/packages/raster/index.html), [terra](https://cran.r-project.org/web/packages/terra/index.html), [maptools](https://cran.r-project.org/web/packages/maptools/index.html), [maps](https://cran.r-project.org/web/packages/maps/), [rgeos](https://cran.r-project.org/web/packages/rgeos/), [sf](https://cran.r-project.org/web/packages/sf/index.html), [kohonen](https://cran.r-project.org/web/packages/kohonen/index.html), [corrplot](https://cran.r-project.org/web/packages/corrplot/index.html), [PCDimension](https://cran.r-project.org/web/packages/PCDimension/index.html), [devtools](https://cran.r-project.org/web/packages/devtools/index.html)
+- github: [marmalaid](https://github.com/BernhardKuehn/marmalaid), [fast.EOT](https://github.com/BernhardKuehn/fast.EOT)
+
+```{r Install packages,message=F,warning=F,eval=FALSE}
+
+install.packages( c("raster","terra","maps","sf","kohonen","corrplot","PCDimension"))
+devtools::install_github("BernhardKuehn/marmalaid")
+devtools::install_github("BernhardKuehn/fast.EOT")
+# additionally some packages are already archived on CRAN, so you need to install the last available version
+devtools::install_version("maptools", version = "1.1.8", repos = "http://cran.us.r-project.org")
+devtools::install_version("rgeos", version = "0.6.4", repos = "http://cran.us.r-project.org")
+
+```
+
+Load all the necessary packages:
+
+```{r Load packages,message=F,warning=F}
+# for analysis
+library(raster)
+library(terra)
+library(maptools)
+library(maps)
+library(rgeos)
+library(sf)
+library(fast.EOT) # for EOT calculation, modified version of the 'remote'-package implementation
+library(marmalaid) # for EOF calculation, seasonal averaging...
+library(kohonen) # for SOM calculation
+library(corrplot)
+library(PCDimension)
+```
+## Download data
+
+The data for this tutorial can be downloaded directly from figshare. 
+
+```{r Download input data, message = F}
+# automatically download input files for the tutorial from figshare
+
+# url for the data for the tutorial on "ways to summarise env data"
+url = "https://figshare.com/ndownloader/files/50656029?private_link=b349a8f507ac4d85b5fc"
+
+# specify data to download
+fn <- "data.zip"
+# directory to store data (create data directory in the folder of each practical)
+fp <- "./"
+
+# (increase timeout for larger files)
+options(timeout = max(300, getOption("timeout")))
+# download
+download.file(url = url,file.path(fp,fn),mode = "wb")
+# unzip
+unzip(file.path(fp,fn),exdir = fp)
+# remove original zip-download
+unlink(file.path(fp,fn))
+```
+
+## Load & prepare data
+
+### Environmental data
+We will use historical Temperature data for the North Sea as a test case, originating from the [AHOI dataset](https://figshare.com/articles/dataset/AHOI_v22_01/16864276/1). The spatial resolution is 0.2° x 0.2° with a monthly timestep extending from 1948 - 2020.  Anyone, who is interested can look at the data at the original link, where those are available in netcdf-format. The choice for this particular dataset lies in its long historical record, even though it has a moderate spatial resolution, but still suited for our purpose. For an easier start, I already organised those datasets in an easy-to-work-with raster format, that I stored via tif-files. 
+
+Since we are only interested in the North Sea (with few adjacent areas with part of the English Channel, West of Scottland and Skaggerrak), we will first cut those extra areas (western English Channel, Irish Sea, Kattegat). 
+
+```{r Load data and prepare data, message = F}
+# load data
+AHOI_SST_raster = brick("./data/AHOI.v2.2/AHOI_SST_raster_1948_2020.tif")
+
+# remove everything except the North Sea (Irish Sea, Kattegat, western English Channel)
+rm.IrishS1 = as(extent(-10.1,-2.5,51,56), 'SpatialPolygons')
+rm.IrishS2 = as(extent(-10.1,-4,50.4,52), 'SpatialPolygons')
+rm.Kattg1 = as(extent(9.5,14,52,56), 'SpatialPolygons')
+rm.Kattg2 = as(extent(10.2,14,52,57.7), 'SpatialPolygons')
+rm.EngCh = as(extent(-10.1,-5.1,49,57.7), 'SpatialPolygons')
+
+# landmasses 
+world.poly = maps::map(database = "world",fill = T,plot = F)
+IDs <- sapply(strsplit(world.poly$names, ":"), function(x) x[1])
+world.poly.sp <- map2SpatialPolygons(world.poly, IDs=IDs, proj4string=CRS("+proj=longlat +datum=WGS84"))
+IDs.extract = which(names(world.poly.sp) %in% c("Germany","UK","Norway","Denmark","Netherlands","Belgium","France"))
+
+# cut
+spatial.domain = world.poly.sp[IDs.extract]
+
+# combine these to one polygon 
+NA.mask = union(union(bind(rm.IrishS1,rm.IrishS2,rm.EngCh),bind(rm.Kattg1,rm.Kattg2)),spatial.domain)#,"SpatialPolygonsDataframe")
+crs(NA.mask) = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs" 
+
+# plot
+par(mfrow = c(1,2))
+#plot(-999,-999,xlim = c(-5,12.5),ylim = c(48,62))
+image(AHOI_SST_raster,xlab = "lon",ylab = "lat",main  = "original SST",
+      xlim = c(-10,25),ylim = c(44,63))
+maps::map(add = T)
+plot(rm.IrishS1,add = T,border = "red")
+plot(rm.IrishS2,add = T,border ="red")
+plot(rm.Kattg1,add = T,border ="red")
+plot(rm.Kattg2,add = T,border = "red")
+plot(rm.EngCh,add = T,border = "red")
+
+# cut 
+AHOI_SST_raster = mask(crop(AHOI_SST_raster,extent(c(-10.1,12,49,64))),NA.mask,inverse = T,updatevalue = NA)
+
+image(AHOI_SST_raster,xlab = "lon",ylab = "lat",main = "cropped SST")
+maps::map(add = T)
+```
+
+### ICES areas
+Additionally, we need to load in the ICES-areas for spatial-averaging later on. 
+
+```{r Load ICES areas,message=F}
+
+# load ICES areas
+ICES.areas = sf::read_sf(dsn = "./data/ICES areas/ICES_Areas_20160601_cut_dense_3857.shp")
+# transform to lat/lon grid
+ICES.areas_lat.lon = sf::st_transform(ICES.areas,
+                                     src = sf::st_crs(ICES.areas),
+                                     crs = sf::st_crs("EPSG:4326"))
+
+ICES.areas_df = as.data.frame(ICES.areas_lat.lon)
+# get areas for the greater North Sea: 
+# 4 - 4a, 4b, 4c
+# 6 - 6a, 6b
+# 7d 
+# 3a-20 (Skagerrak)
+# 3a-21 (Kattegat)
+
+ICES.areas_lat.lon_sub = ICES.areas_lat.lon[ICES.areas_lat.lon$Area_Full %in% 
+                         paste(27,c("3.a.20","4.a","4.b","4.c","6.a","6.b","7.d"),sep = "."),]
+
+```
+
+### Spawning areas of North Sea cod
+Also as we want to aggregate over a lifecycle related area of a stock, we load a shapefile depicting the spawning areas of North Sea cod. The data comes from IMR (Institute of Marine Research Norway) collected under the KINO project [@sundby2017dynamic]. You can find the shapefiles for display in the [IMR geodata catalogue](https://www.imr.no/geodata/geodataHI.html) and downloadable in various formats [here](https://kart.hi.no/data), labelled as "Nordsjotorsk". The data is provided under the [CC by 4.0 license](https://creativecommons.org/licenses/by/4.0/).  
+
+```{r Load Spawning Areas,message=F}
+
+# load spawn. areas
+spawn.areas_lon_lat = sf::read_sf(dsn = "./data/Nordsjotorsk/Nordsjotorsk.shp")
+
+```
+
+## Step-by-step guide on ways to summarise environmental data
+
+### Pre-processing
+
+The data currently have a monthly temporal resolution. For our purpose here we look at a yearly time step as this is often the resolution of biological data in fisheries sciences. Therefore we first perform a temporal aggregation by calculating a yearly average (mean over all month) or if we have a certain hypothesis, which temporal window is likely influencing our stock of interest, a seasonal average.
+
+```{r Preprocessing env. data}
+
+# get the time of the raster (stored in the field names)
+time.ahoi = as.Date(gsub("X","",names(AHOI_SST_raster)),
+                    format = "%Y.%m.%d")
+
+# calculate yearly averages
+temp.YR = calc.mean.over.Month(raster = AHOI_SST_raster,
+                               time = time.ahoi,
+                               month = 1:12,
+                               shiftYear = F,
+                               verbose = F)
+
+# get time for the aggregated data
+time.ahoi.yr = as.numeric(gsub("X","",names(temp.YR)))
+```
+
+### 1. Spatial averages
+
+The simplest way to aggregate spatio-temporal data is to calculate some form of spatial averages. This could be done either: 
+
+a) over the **whole spatial domain** 
+b) a **subset** (e.g. ICES stock area) or 
+c) a **spatially-weighted scheme** (e.g. spawning grounds). 
+
+Let´s see how to do this for our temperature data in the spatio-temporal realm of the North Sea cod stock. 
+
+
+Temperature average over the **whole North Sea**: 
+
+```{r Spatial averages 1,message = F,results = 'hide',warning=F,error=F}
+
+# do it over the domain of the environmental data roughly cropped to the North Sea
+temp.YR_NS = crop(temp.YR,extent(-5.1,12,49,62.1))
+NS.mean_YR = data.frame(NS.mean = cellStats(temp.YR_NS,mean))
+
+```
+
+Temperature average over the relevant **ICES areas**:
+
+```{r Spatial averages 2,message = F,results = 'hide',warning=F,error=F}
+
+# do it for the ICES area in which the stock recides
+# extract regions & mask the land & crop
+regions = ICES.areas_lat.lon_sub
+temp.YR_ICES.area = terra::mask(terra::rast(temp.YR),
+                                mask = terra::vect(regions))
+NS.ICESarea.mean_YR = data.frame(NS.ICESarea.mean = cellStats(brick(temp.YR_ICES.area),mean))
+
+```
+
+Temperature average over the **spawning grounds** of North Sea cod
+
+```{r Spatial averages 3,message = F,results = 'hide',warning=F,error=F,fig.width=5,fig.height=6}
+
+# do it for the spawning grounds of the stock
+spawn_all = spawn.areas_lon_lat[grepl("Spawning",spawn.areas_lon_lat$map_type_e) & 
+                                  !grepl("Spawning area High",spawn.areas_lon_lat$map_type_e),]
+spawn_high = spawn.areas_lon_lat[grepl("Spawning area High",spawn.areas_lon_lat$map_type_e),]
+
+temp.YR_spawn_all = terra::mask(terra::rast(temp.YR),
+                            mask = terra::vect(spawn_all))
+temp.YR_spawn_high = terra::mask(terra::rast(temp.YR),
+                            mask = terra::vect(spawn_high))
+temp.YR_spawn_low = terra::mask(temp.YR_spawn_all,
+                            mask = temp.YR_spawn_high != 0,inverse = T)
+
+# weight those (chose some arbitrary weights)
+w.low = 0.5
+w.high = 1
+temp.YR_spawn_wgt = sum(w.low*temp.YR_spawn_low,w.high*temp.YR_spawn_high,na.rm = T)/(w.low+w.high)
+# calculate time series as average over spawning regions
+NS.Spawnarea.mean_YR = data.frame(NS.Spawnarea.mean = cellStats(brick(temp.YR_spawn_wgt),mean))
+
+# crop to lower extent for plotting 
+temp.YR_spawn_all = crop(temp.YR_spawn_all,extent(c(-5,10,49,62)))
+temp.YR_spawn_high = crop(temp.YR_spawn_high,extent(c(-5,10,49,62)))
+temp.YR_spawn_low = crop(temp.YR_spawn_low,extent(c(-5,10,49,62)))
+temp.YR_spawn_wgt = crop(temp.YR_spawn_wgt,extent(c(-5,10,49,62)))
+
+par(mfrow = c(2,2),mar = c(3,2,3,2),oma = c(0,0,2,0))
+image(brick(temp.YR_spawn_all),main = "Spawn. all",las = 1)
+maps::map(add = T)
+image(brick(temp.YR_spawn_high),main = "Spawn. high",las = 1)
+maps::map(add = T)
+image(brick(temp.YR_spawn_low),main = "Spawn. low",las = 1)
+maps::map(add = T)
+image(brick(temp.YR_spawn_wgt),main = "Spawn. weighted",las = 1)
+maps::map(add = T)
+mtext("Spawning grounds Cod",
+      side = 3,outer = T,
+      line = 0,font = 2,cex = 1.2)
+```
+
+Compare the time series of the three averaging procedures: 
+```{r Compare the 3 averaging procedures,message = F,results = 'hide',warning=F,error=F,fig.width=7,fig.height=5}
+# compare
+par(mfrow = c(1,1),mar = c(4,4,3,4),oma = c(0,0,0,0))
+plot(time.ahoi.yr,scale(NS.mean_YR),type = "l",
+     xlab = "year",ylab = "scaled Temp.",col = "darkred")
+lines(time.ahoi.yr,scale(NS.ICESarea.mean_YR),col = "orange")
+lines(time.ahoi.yr,scale(NS.Spawnarea.mean_YR),col = "aquamarine2")
+legend("topleft",legend = c("NS mean","ICES area 4.6a.3.20 mean","Spawning ground mean"),
+       col = c("darkred","orange","aquamarine2"),lwd = 2,lty = 1,bty = "n")
+title("Comparison of spatial averages",adj = 0)
+```
+
+As you can see, the resulting time series are very much alike, regardless of the averaging procedure, due to the high spatial autocorrelation of temperature and high overlap of the averaging regions. 
+
+### 2. EOF-analysis (or PCA)
+
+A typical way to summarise spatio-temporal data in a few informative pattern that describe most of the variance in the dataset is via a Principal component analysis (PCA), also called Empirical orthogonal functions (EOF) in the climate/oceanographic sciences. Since atmospheric and oceanographic fields typically exhibit a high spatial autocorrelation, EOF-analysis is particularly suited to reduce the field to a compact representation of its variations. 
+Briefly, it decomposes a spatio-temporal field into a linear combination of orthogonal spatially stationary structures (eigenvectors or EOFs) and their oscillation in time (principal components [PCs]) by rotating the coordinate system in the direction of highest variance (Björnssin & Venegas 1997). 
+A better understanding of the procedure can be developed by realising how the original field can be reconstructed namely by multiplying the spatial component (EOF-pattern) with the time component (PCs) and summing up over all resulting decompositions. With this in mind the EOF-pattern can be understood as spatial weights, highlighting regions with a similar behavior in time and the PC time series the concrete temporal dynamic of those regions. The orthogonality constraint (resulting time series are uncorrelated) can sometimes result in mixing of climate modes/pattern, thus a natural phenomenon being resolved in more than one mode. 
+
+```{r EOF analysis,message = F,warning=F,error=F}
+
+# perform an EOF-analysis on temperature
+eof.out_YR = spatial.PCA(x = temp.YR,
+            center = T,scale. = F,
+            spatial.extent = NULL,
+            plot = F,var.threshold = 0.99)
+
+# get significant PCs
+n.eofs = bsDimension(lambda = eof.out_YR$sp.PCA$sdev^2)
+plot(eof.out_YR$sp.PCA$sdev^2/sum(eof.out_YR$sp.PCA$sdev^2),type = "h",xlab = "PC",ylab = "expl. Var")
+lines(PCDimension::brokenStick(1:73,73),col = "red")
+
+# plot the EOF-pattern
+plot_eof(eof.out_YR,n = n.eofs)
+
+# store the PC time series
+eof.YR_ts = eof.out_YR$sp.PCA$x
+
+```
+
+### 3. EOT-analysis (Empirical orthogonal teleconnections)
+
+Empirical orthogonal teleconnections (EOTs) are a different way to extract spatio-temporal pattern from climate and oceanographic data via a rather simple linear regression framework [@vandenDool2000eot]. 
+EOTs search for a base point, which explains most of the variance in the overall field (all points combined). The residuals from this linear regression of this point to all others are than removed from the original field and the remainder used in a second EOT analysis again looking for a point with the highest correlation to all others. The analysis is repeated until a predefined number of EOT-pattern is found. 
+All EOT time series are representations of a specific point in space, thus being easy to interpret, but also carry over the noise component of the original data contrary to EOF-analysis where this is removed or put into trailing EOF-pattern. For interpretation: the temporal EOT pattern (aka time series) is the time series at a specific grid point, the spatial EOT pattern (aka field) are the regression weights of this time series with all the others (the field). 
+
+```{r EOT analysis,message = F,results = 'hide',warning=F,error=F}
+
+# define the number of EOTs to calculate
+n.eots = 20 # seems like a reasonable amount
+
+# center dataset for analysis (remove mean/calculate anomalies)
+temp.YR_centered = fieldAnomaly.raster(temp.YR,time = time.ahoi.yr)
+
+# calculate EOTs for the dataset
+eot.out_YR = fast.eot(x = temp.YR_centered,n_cores = 4,n = n.eots, standardised = F)
+
+# function to select Nr. of EOTs via finding the elbow in the var-expl
+find.elbow = function(modes,expl.var,plot = F){
+  require(segmented)
+  
+  stopifnot(length(modes) == length(expl.var))
+  
+  df = data.frame(mode = modes,expl.var = expl.var)          
+  
+  # estimate only integer breakpoints (digits = 0)
+  mod = segmented(obj = lm(expl.var~mode,data = df),npsi = 1,
+                  control = seg.control(n.boot = 100,digits = 2))
+  breakpoint = round(mod$psi[,"Est."])
+  if(plot == T){
+    plot(df$mode,df$expl.var,type = "p",pch = 16,xlab = "mode",ylab = "Cum. expl. Var [%]")
+    lines(seq(0,max(modes),0.01),
+          predict(mod,data.frame(mode = seq(0,max(modes),0.01))),lwd = 2,col = "gray50")
+    abline(v = breakpoint,lty = 2,col = "red")
+    title("Elbow-plot",adj = 0)
+  }
+  return(breakpoint)
+}
+
+# get modes with explained variance
+n.eots = find.elbow(modes = 1:n.eots,
+           expl.var = sapply(eot.out_YR,function(x) x@cum_exp_var),plot = T)
+# 5 
+eot.YR_ts = sapply(eot.out_YR,function(x) x@eot)
+
+# plot eot pattern
+plot_eot(eot.out = eot.out_YR,
+         n = n.eots,type = "regression weights")
+
+```
+
+### 4. Spatial Clustering 
+
+A different way to map a highly-dimensional spatio-temporal field to a lower representation is through spatial clustering. Here time series with a similar shape are clustered together, creating regions in space with a similar behavior in time. 
+A clustering method which can be applied are Self-organising-maps (SOM). Via t-SOM (temporal-SOM) a spatio-temporal field can be easily reduced to a handful of clustered time series, which represent the mean over the clustered area. 
+
+
+```{r Spatial clustering,message = F,results = 'hide',warning=F,error=F}
+
+# load the temporal som function
+source("./functions/temporal.SOM.R")
+
+# decompose the grid into 6 spatial clusters
+tSOM_temp = temporal.SOM(x = temp.YR,time = 1948:2020,plot = T,parallel = c(parallel = T,cores = 4),seed = 42,reps = 100,
+                         grid = kohonen::somgrid(xdim = 2, ydim = 3, topo = "rectangular",
+                         neighbourhood.fct = "bubble", toroidal = FALSE),
+                         )
+# get the different clustered time series 
+tSOM_ts = tSOM_temp$Clustered.ts[,-1]
+
+```
+
+### 5. Comparison of different methods
+
+Comparing the results of those different methods reveals similarities, but also differences.
+Since temperature exhibits a high spatial autocorrelation, many of the resulting time series show a strong correlation between methods. 
+
+```{r,message = F,warning = F,fig.width= 10,fig.asp = 0.8}
+
+# join all together
+temp_mat = cbind(NS.mean_YR,
+                 NS.ICESarea.mean_YR,
+                 NS.Spawnarea.mean_YR,
+                 eof.YR_ts[,1:n.eofs],
+                 eot.YR_ts[,1:n.eots],
+                 tSOM_ts)
+# plot a correlation matrix
+corrplot(cor(temp_mat),diag = F)
+```
+
+The first two spatial pattern of the EOF and EOT analysis are in general quite similar.
+The first PC basically corresponds to the mean over the whole North Sea domain, also being highly correlated with the first EOT pattern and as such also with the time series originating from the spatial averaging procedures.  
+
+The second PC and the second EOT also show a similar pattern denoting a temperature signal in the north west around the Orkneys -  an area of inflow of Atlantic water into the North Sea. This signal is also correlated to the cluster 6 of the SOM water mass analysis, showing a similar inflow pattern (even though the cluster has a different extent).   
+
+```{r,message=F,warning=F,error=F,fig.width=8,fig.height=5}
+
+col.pal = grDevices::colorRampPalette(rev(RColorBrewer::brewer.pal(10,"RdYlBu")))(100)
+
+
+# get SOM-mean pattern for cluster 6
+cl6_mask = tSOM_temp$SOM.raster == 6
+SOM_temp_cl6 = terra::mask(crop(mean(temp.YR),extent(cl6_mask)),
+            mask = cl6_mask,maskvalue = 1,inverse = T)
+
+# plot EOF2 & EOT2 and tSOM6
+par(mfrow = c(1,1),mar = c(3,3,3,3))
+layout(matrix(c(1:3,rep(5,2),rep(4,5)),nrow = 2,ncol = 5,byrow = T),height = c(1.2,0.8))
+image(eof.out_YR$raster[[2]],col = col.pal,main = "EOF2",las = 1)
+maps::map(add = T,fill = T,col = "gray80")
+box(col = "deeppink4",lwd = 2)
+image(eot.out_YR$EOT2@rsq_predictor,col = col.pal,main = "EOT2",las = 1)
+maps::map(add = T,fill = T,col = "gray80")
+box(col = "orange",lwd = 2)
+image(SOM_temp_cl6,
+     col = col.pal,main = "tSOM6",las = 1)
+maps::map(add = T,fill = T, col = "gray80")
+box(col = "olivedrab",lwd = 2)
+plot(time.ahoi.yr,scale(eof.YR_ts[,2]),
+     type = "l",col = "deeppink4",lwd = 2,
+     xlab = "year",ylab = "",main = "Time series")
+lines(time.ahoi.yr,scale(eot.YR_ts[,2]),col = "orange",lwd = 2)
+lines(time.ahoi.yr,scale(tSOM_ts$ts.V6),col = "olivedrab",lwd = 2)
+corrplot.mixed(cor(temp_mat[,c("PC2","EOT2","ts.V6")]),
+               lower = "ellipse",upper = "number",mar = c(0,0,2,0),
+               title = "Correlations",
+               tl.col = c("deeppink4", "orange","olivedrab"),
+               tl.cex = 1.3)
+
+```
+
+## Summary
+
+All in all, there are different approaches available to summarise the information contained in spatio-temporal environmental fields to a reduced set of informative time series.
+
+Data-driven dimension reduction has the advantage of effectively utilising the information contained in the environmental field, but does not necessarily perfectly match the spatio-temporal scale of the biological process. Hypothesis-based spatial averaging can be adapted to more closely resemble the known scale of the stock, but might be redundant in the selection of patterns.   
+
+Which of those approaches to prefer is up to discussion and not the focus of this tutorial, since it is very much related to the specific stock, the biological process of interest and the type of environmental variables considered. However, it should be understood that this tutorial is meant to give you tools at hand to get your covariate of interest, but does not replace a proper literature investigation and generate hypothesis first, rather than going through all potential possibilities with the risk of spurious discoveries. 
+
+## References 
