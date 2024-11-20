@@ -1,4 +1,5 @@
 # SEAwise_ecoMSE
+**Warning: this information will not be complete until Friday Nov 22nd, so students will need to check back at that time.**
 
 *Integrating environmental impacts on stock productivity in Management Strategy Evaluation models* ([ICES webpage](https://www.ices.dk/events/Training/Pages/MSEmodels24.aspx))
 
