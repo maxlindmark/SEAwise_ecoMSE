@@ -1,5 +1,11 @@
 
+
+# model selection ---------------------------------------------------------
+# render html
 rmarkdown::render(
-  input = "Rmarkdowns/modelSelection/modelSelection.Rmd",
-  output_file = "Rmarkdowns/modelSelection.html"
+  input = "modelSelection/modelSelection.Rmd",
+  output_file = "modelSelection.html"
 )
+
+# extract code
+knitr::purl(input = "modelSelection/modelSelection.Rmd", output = "modelSelection.R", documentation = 1)

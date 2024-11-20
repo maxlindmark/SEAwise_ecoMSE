@@ -51,5 +51,10 @@ rsconnect/
 # In case of temporary directory
 /tmp/
 
-/modelSelection/modelSelection_cache/
+# don't sync modelSelection html and related files (self contained)
+/modelSelection/modelSelection.html
 /modelSelection/modelSelection_files/
+
+# don't sync modelSelection.Rmd code
+/modelSelection/modelSelection.R
+
