@@ -58,3 +58,8 @@ rsconnect/
 # don't sync modelSelection.Rmd code
 /modelSelection/modelSelection.R
 
+# do not sinc data folder
+data/
+
+# do not sink html files
+*.html
