@@ -66,7 +66,12 @@ install.packages(c(
 
 ```
 
-### day 2 - 05. practical on model selection
+### day 2 - 05. practical on model fitting to recruitment
+```R
+install.packages(c("modelr","nlstools","MuMIn","rlist","formula.tools","corrplot"))
+```
+
+### day 2 - 06. practical on model selection
 
 ```R
 install.packages(c(
