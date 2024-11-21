@@ -1,0 +1,1402 @@
+---
+title: "How to generate multiple runs from climate projections?"
+author: "Bernhard Kuehn"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+bibliography: BVAR_tutorial.bib  
+link-citations: true
+output:
+  cleanrmd::html_document_clean:
+    toc: true
+    mathjax: default
+    use_fontawesome: true
+    theme: new.css
+    highlight: "espresso"
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,cache.lazy = FALSE)
+```
+
+## Introduction
+
+Simulation models like the bioeconomic, fisheries simulation model FLBEIA for the North Sea require specification of the uncertainty associated with predictions. When projecting fisheries management scenarios into the future, additional uncertainty arises from the environmental data (time series) following a specific climate trend (aka RCP4.5 or RCP8.5 runs) that needs to be incorporated within the simulations. One way would be to use only the trend of the environmental time series, however this would completely neglect the associated uncertainty of the time series. 
+
+A typical way would be to use several realisations of the environmental variable and force the simulation model for a series of Monte Carlo simulations. However, if the output of the utilised climate projection model (such as the POLCOM-ERSEM runs originating from the CERES project) comprises only one run, the question arises on how to generate several iterations. 
+
+A simple way to generate additional realisations that capture some of the properties of the original time series, would be a form of time series decomposition (aka Box-Jenkins approach). One would first decompose the time series into trend (linear/nonlinear), seasonal signal (if there is one) and remainder and model the pattern in the residuals e.g. with an AR1 (autoregressive process of order 1) process. Than one could generate e.g. 100 realisations of the AR1 process, add back the seasonal signal and trend and have 100 possible realisations of the environmental time series one could use in a Monte Carlo fashion in the fisheries management model.
+
+This is a perfectly valid approach if one does only have one environmental signal, which needs to be integrated into the simulation model. However, what if one does have several environmental signals? Here one does not only want to capture the individual time evolution of the signal in the future, but also get the interdependencies between closely related signals (e.g. temperature and salinity) right. An approach like the univariate time series decomposition would be to extent this into a multivariate way by using Vector Autoregression (VARs) and model the time progression of one variables by a linear combination of past influences (lagged) of own and that from others. This tutorial shows some quick steps on how to accomplish this task in R. 
+
+## Required packages to run this tutorial 
+
+In order to execute the code in this tutorial you should have the following packages installed:
+
+- CRAN: [raster](https://cran.r-project.org/web/packages/raster/), [terra](https://cran.r-project.org/web/packages/terra/), [maps](https://cran.r-project.org/web/packages/maps/), [plyr](https://cran.r-project.org/web/packages/plyr/), [BVAR](https://cran.r-project.org/web/packages/BVAR/), [scam](https://cran.r-project.org/web/packages/scam/), [mgcv](https://cran.r-project.org/web/packages/mgcv/), [doParallel](https://cran.r-project.org/web/packages/doParallel/),
+[doSnow](https://cran.r-project.org/web/packages/doSnow/),
+[foreach](https://cran.r-project.org/web/packages/foreach/),
+[funtimes](https://cran.r-project.org/web/packages/funtimes/),
+[coda](https://cran.r-project.org/web/packages/coda/),
+[tsDyn](https://cran.r-project.org/web/packages/tsDyn/),
+[gsignal](https://cran.r-project.org/web/packages/gsignal/),
+[FNN](https://cran.r-project.org/web/packages/FNN/),
+[RcppEigen](https://cran.r-project.org/web/packages/RcppEigen/),
+[RcppArmadillo](https://cran.r-project.org/web/packages/RcppArmadillo/),
+[ggplot2](https://cran.r-project.org/web/packages/ggplot2/),
+[colorspace](https://cran.r-project.org/web/packages/colorspace/),
+[patchwork](https://cran.r-project.org/web/packages/patchwork/),
+[devtools](https://cran.r-project.org/web/packages/devtools/)
+[cleanrmd](https://cran.r-project.org/web/packages/cleanrmd/)
+- github: [marmalaid](https://github.com/BernhardKuehn/marmalaid)
+
+```{r Install packages,message=F,warning=F,eval=FALSE}
+
+install.packages(c("raster","terra","maps","plyr",
+                   "BVAR","scam","mgcv","reshape2",
+                   "devtools","doParallel","doSnow",
+                   "foreach","funtimes","coda","tsDyn",
+                   "gsignal","FNN","Rcpp","RcppEigen",
+                   "RcppArmadillo","ggplot2","colorspace",
+                   "patchwork","cleanrmd"))
+devtools::install_github("BernhardKuehn/marmalaid")
+```
+
+
+```{r Load packages,message=F,warning=F}
+# for analysis
+library(raster)
+library(terra)
+library(marmalaid) # devtools::install_github("BernhardKuehn/marmalaid")
+library(BVAR)
+library(scam)
+library(mgcv)
+library(funtimes)
+library(coda)
+library(tsDyn)
+library(reshape2)
+library(plyr)
+library(gsignal)
+library(FNN)
+library(Rcpp)
+library(RcppEigen)
+library(RcppArmadillo)
+
+# for parallelisation
+library(parallel)
+library(doParallel)
+library(doSNOW)
+library(foreach)
+
+# for plotting
+library(colorspace)
+library(ggplot2)
+library(maps)
+library(patchwork)
+
+```
+
+In this tutorial we want to build a BVAR - a bayesian version of Vector Autoregression models, since we deal with spatiotemporal data, which is quite large and can bring ordinary VARs to their limits. The problem with VARs in this case, is that not all parameters (a lot of different time series + lagged influences) can be estimated consistently. Therefore the bayesian approach focuses on constraining the model coefficients in a meaningful way through the use of priors. 
+
+## Download data
+
+The data for this tutorial can be downloaded directly from figshare. 
+
+```{r Download input data, message = F}
+# automatically download input files for the tutorial from figshare
+
+# url for the data for the tutorial on "ways to summarise env data"
+url = "https://figshare.com/ndownloader/files/41306751"
+
+# specify data to download
+fn <- "data.zip"
+# directory to store data (create data directory in the folder of each practical)
+fp <- "./"
+
+# (increase timeout for larger files)
+options(timeout = max(300, getOption("timeout")))
+# download
+download.file(url = url,file.path(fp,fn),mode = "wb")
+# unzip
+unzip(file.path(fp,fn),exdir = fp)
+# remove original zip-download
+unlink(file.path(fp,fn))
+```
+
+### Load data & helper functions
+
+We start by loading the RCP projections (POLCOM-ERSEM output) of SST, Salinity and Currents (u & v) from the North Sea into R. 
+
+```{r Load data and helper functions, message = F}
+# load projection data
+load("./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_SST_raster_meanBiasRM.RData")
+load("./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_Salinity_raster_meanBiasRM.RData")
+load("./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_Currents_raster_meanBiasRM.RData")
+```
+
+Also we load a little helper function that we will later use to remove the nonlinear trend from each time series utilising the 'scam'-package, that allows to constrain the fitting procedure by including only monotone decreasing or increasing trends. 
+
+```{r Helper functions 2,message = F}
+# helper function to remove nonlinear trend (via scam)
+  nonlinear.Trend = function(time,ts,...){
+    library(mgcv)
+    library(scam)
+    data = data.frame(time,ts)
+    # check linear trend
+    lm.trend = lm(ts ~ time,data = data)$coefficients[[2]]
+    if(lm.trend >= 0){
+      # monotone increasing p-spline
+      formula = as.formula(paste("ts","s(time,bs = 'mpi')",sep = " ~ "))
+    } else{
+      # monotone decreasing p-spline
+      formula = as.formula(paste("ts","s(time,bs = 'mpd')",sep = " ~ "))
+    }
+    mod = scam(formula,data = data[complete.cases(data),],family = stats::gaussian(link = "identity"),...)
+    
+    return(predict(mod,newdata = data.frame(time = time)))
+}
+```
+## step-by-step guide to build a BVAR
+
+Here I try to explain the different steps, needed for this approach. If you are interested in just applying this to your own data without understanding the steps in details, see the [next chapter](#chapter2) for a self-written wrapper function that incorporates all these steps. 
+
+### 1. perform EOF analysis per variable
+
+The first step is done to have a lower dimensional space to build the BVAR on, as building a model from every time series of each spatio-temporal field would be unfeasible. 
+
+```{r Dimension reduction of spatio-temporal fields,message = F,results = 'hide'}
+# calculate anomalies
+POLCOM_ERSEM_SST_raster_meanBiasRM_anom = lapply(POLCOM_ERSEM_SST_raster_meanBiasRM,function(x)
+  fieldAnomaly.raster(x,time = as.Date(sub("X","",names(x)),format = "%Y.%m.%d"),level = "month"))
+POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom = lapply(POLCOM_ERSEM_Salinity_raster_meanBiasRM,function(x)
+  fieldAnomaly.raster(x,time = as.Date(sub("X","",names(x)),format = "%Y.%m.%d"),level = "month"))
+POLCOM_ERSEM_Currents_raster_meanBiasRM_anom = lapply(POLCOM_ERSEM_Currents_raster_meanBiasRM,function(x) lapply(x,function(xx)
+  fieldAnomaly.raster(xx,time = as.Date(sub("X","",names(xx)),format = "%Y.%m.%d"),level = "month")))
+
+# build EOFs from each spatiotemporal field seperately
+EOF.Salinity = spatial.PCA(x = POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,center = T,scale. = F,
+                           spatial.extent = extent(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45))
+EOF.SST = spatial.PCA(x = POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,center = T,scale. = F,
+                      spatial.extent = extent(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45))
+EOF.currents = spatial.PCA(x = POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45,center = T,scale. = F,
+                           spatial.extent = extent(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u))
+
+# 1. select no. of meaningful PCs
+thresh = 0.8
+pcs.sal = which(cumsum(EOF.Salinity$sp.PCA$sdev^2/sum(EOF.Salinity$sp.PCA$sdev^2))> thresh)[1]
+pcs.sst = which(cumsum(EOF.SST$sp.PCA$sdev^2/sum(EOF.SST$sp.PCA$sdev^2))> thresh)[1]            
+pcs.currents = which(cumsum(EOF.currents$sp.PCA$sdev^2/sum(EOF.currents$sp.PCA$sdev^2))> thresh)[1]            
+pcs.sal # 14 PCs
+pcs.sst # 3 PCs
+pcs.currents # 34 PCs
+# 51 PCs in total
+
+```
+
+```{r plot pca result,echo = F}
+
+# check explained variance
+par(mfrow = c(3,1),mar = c(2,3,2,2),oma = c(2,0,2,0))
+plot(cumsum(EOF.Salinity$sp.PCA$sdev^2/sum(EOF.Salinity$sp.PCA$sdev^2)),xlab = "",type = "b")
+abline(v = which(cumsum(EOF.Salinity$sp.PCA$sdev^2/sum(EOF.Salinity$sp.PCA$sdev^2))> thresh)[1],lty = 2,col = "red")
+title("Salinity",adj = 0)
+plot(cumsum(EOF.SST$sp.PCA$sdev^2/sum(EOF.SST$sp.PCA$sdev^2)),xlab = "",type = "b")
+abline(v = which(cumsum(EOF.SST$sp.PCA$sdev^2/sum(EOF.SST$sp.PCA$sdev^2))> thresh)[1],lty = 2,col = "red")
+title("SST",adj = 0)
+plot(cumsum(EOF.currents$sp.PCA$sdev^2/sum(EOF.currents$sp.PCA$sdev^2)),xlab = "",type = "b")
+abline(v = which(cumsum(EOF.currents$sp.PCA$sdev^2/sum(EOF.currents$sp.PCA$sdev^2))> thresh)[1],lty = 2,col = "red")
+title("Currents",adj = 0)
+mtext("Cummulative explained Variance EOF-analysis",side = 3,line = 0.5, outer = T,font = 2)
+mtext("Number of PCs",side = 1,line = 1,outer = T)
+
+```
+
+```{r}
+# select PCs
+PCs_Salt = EOF.Salinity$sp.PCA$x[,1:pcs.sal]
+PCs_SST = EOF.SST$sp.PCA$x[,1:pcs.sst]
+PCs_Currents = EOF.currents$sp.PCA$x[,1:pcs.currents]
+```
+
+So using a threshold of 80% explained variance (which seems reasonable) per environmental field yielded 51 PCs, instead of using all the `r dim(EOF.Salinity$sp.PCA$x)[1] + dim(EOF.SST$sp.PCA$x)[1] + dim(EOF.currents$sp.PCA$x)[1]` PCs to work with in our BVAR modelling, which is much better than using the original dimensionsionality.
+
+### 2. remove nonlinear, monotone trend
+
+```{r Remove nonlinear-monotone trend from PCs,eval=T}
+# remove trends to make things stationary
+PCs_Salt_trend = apply(PCs_Salt,2,function(x) nonlinear.Trend(time = 1:length(x),ts = x))
+PCs_SST_trend = apply(PCs_SST,2,function(x) nonlinear.Trend(time = 1:length(x),ts = x,optimizer = "efs"))
+PCs_Currents_trend = apply(PCs_Currents,2,function(x) nonlinear.Trend(time = 1:length(x),ts = x,optimizer = "efs"))
+
+# remove trend
+PCs_Salt_trend.rm = PCs_Salt - PCs_Salt_trend
+PCs_SST_trend.rm = PCs_SST - PCs_SST_trend
+PCs_Currents_trend.rm = PCs_Currents - PCs_Currents_trend
+
+# add together
+y.trend.rm = cbind(PCs_Salt_trend.rm,PCs_SST_trend.rm,
+                   PCs_Currents_trend.rm)
+```
+
+### 3. fit BVAR
+
+This section relies heavily on the BVAR-manual of @Kuschnig_Vashold2021 as well as the theoretical foundation outlined in @Giannone2012.  
+
+VAR models are the multivariate form of simple autoregressive (AR) processes, where lagged interdependencies between multiple variables are considered. A VAR(p) model of lag-order $p$, can be written as:
+
+$y_t = a_{0} + A_1 y_{t-1} + ... + A_p y_{t-p} + \epsilon_t,~~ with ~~ \epsilon_t \text{~} N(0,vcov)$
+
+with $y_t$ being the M x 1 vector of all included variables at lag t, $a_0$ the M x 1 intercept vector, $A_j, (j = 1,...,p)$ the M x M coefficient matrices and $\epsilon_t$ being the multivariate gaussian noise term with zero mean and variance-covariance matrix (VCOV). 
+The amount of coefficients estimated rises quadratically with the number of included variables and linearly in the lag-order with $M + M^2p$. Standard OLS-estimation of the coefficients can therefore quickly run into instabilities. Therefore the bayesian approach tries constrain the lagged influences in a parsimonious way to follow an additional structure (aka regularization or shrinkage) via the use of priors. A standard prior configuration often used as a baseline in the BVAR setting is the Minnesota-prior.
+
+In simple words, the Minnesota prior (also called Litterman prior) imposes a prior restriction on the coefficients, giving more importance to lags of the recent past than at earlier time steps for the variable's current value. Additionally, the influence of own past influences (autocorrelation) is hypothesised to be stronger than past influences of other variables (crosscorrelation).
+
+As the number of coefficients is typically quite large, the Minnesota prior is formulated via a small number of hyperparameters (hierachical formulation).
+
+The prior is formulated via the following moments (expected value/covariance):
+
+$$
+\mathbb{E}[(A_s)_{ij}|vcov] = 
+\begin{cases}
+ 1 ,& if~~i = j,s = 1 \\ 
+ 0  ,& otherwise
+ \end{cases}       
+$$
+That means that all coefficients, but the first own lag, have zero prior mean. 
+
+$$
+cov[(A_s)_{ij},(A_r)_{kl}|vcov] = 
+\begin{cases}
+ \lambda^2 \frac{1}{s^\alpha} \frac{vcov_{ik}}{\psi_j/(d-M-1)} ,& if~~l = j,r = s \\ 
+ 0  ,& otherwise
+ \end{cases}       
+$$
+Additionally, prior distributions are more narrow for coefficients on longer lags. Similarly, prior distributions for lags of other variables are more narrow than for own lags.
+
+Here the hyperparameter $\lambda$ controls the tighness of the (co-)variance of the prior for coefficients at different lags.
+
+<!-- There are the hyperparameters $\phi_{i}$, $i = 0,1,2$, controlling the tightness of the variance for coefficients at different lags: $\phi_{0}$ controls the tightness of the variance at lag 1, $\phi_{1}$ the relative tightness of other variables and $\phi_{2}$ the relative tightness of exogenous variables.  -->
+$\psi$ controls the prior's standard deviation on lags of variables other than the dependent. 
+
+The function $\alpha(\tau)$ determines the relative tightness of the variance of lags apart from the first one, typically being a decaying function of lag-order e.g. a harmonic or geometric decay with increasing lags. 
+The Variance-covariance matrix is a-priori set to a diagonal matrix (ones at the diagonal, zeros elsewhere), with independence between the coefficients of different VAR-equations. 
+
+In the BVAR package the $\lambda$ hyperparameter is defined via a gamma-distributed hyperprior. Here I use the default values taken from @Kuschnig_Vashold2021, suggesting the mode of lambda to be set to $0.2$, mainly controlling the tightness of the variance at lag 1. The variance is set to $0.4$, corresponding to a relatively loose prior for the VAR coefficients. Additionally the hyperprior takes arguments for an upper and lower bound for its Gaussian proposal distribution. $\alpha(\tau)$ corresponds to a harmonic decay with higher order lags set to $1$ or $2$.  
+The model constant (intercept) is set to a relatively large number, corresponding to an uninformative (diffuse) prior. $\phi$ is left to be fitted automatically, after fitting an AR(p)-processes to each of the variables. Further descriptions of the parameter settings can be found in the BVAR package manual [@Kuschnig_Vashold2021].
+
+For this tutorial, we estimate a BVAR with lag order $p = 1$ for simplicity (and also for parsimonity). One can test various models of different lag-order $p$ and compare them via AIC or BIC to choose the correct lag-order. But keep in mind, that estimating models of higher lag-order are harder to estimate, take longer to run and have a higher chance to be overparameterised.  
+
+```{r Define priors & fit BVAR,eval = T,results = 'hide',cache = T}
+# fit the VAR model
+# Build a Bayesian Var with Minnesota prior
+
+# specify minnesota prior
+mn <- bv_minnesota(lambda = bv_lambda(mode = 0.2, 
+                                      sd = 0.4, 
+                                      min = 0.0001,
+                                      max = 5),
+                   alpha = bv_alpha(mode = 2,
+                                    sd = 0.25,
+                                    min = 1,
+                                    max = 3),
+                   var = 1e07)
+priors <- bv_priors(hyper = "auto", mn = mn)
+# metropolis-hastings
+mh <- bv_metropolis(scale_hess = 0.005, adjust_acc = TRUE,
+                    acc_lower = 0.25, acc_upper = 0.35, acc_change = 0.02)
+
+# run model fitting
+mar = bvar(data = y.trend.rm, lags = 1, n_draw = 20000, n_burn = 5000, n_thin = 1,
+           priors = priors, mh = mh,verbose = T)
+```
+
+To check if our MCMC simulations converged and yielded reasonable parameter estimates, we check if it yields a suitable acceptance rate of the MH step, trace and density plots of parameters. This can be done via "plot()". Visual inspection shows convergence of the key hyperparameters with no strong outliers. An additional convergence metric is the "Geweke-diagnostic", which evaluates if the chain converged by testing for equality with the "means within certain parts of a Markov Chain." (Kuschnig & Vashold 2019) This basically looks for stationarity of your chain, by comparing the means of the first and last part and checking for equality. If they are not significantly different from each other, the chain is converged.  
+The value is a simple Z-score, wich can be compared to the Z-score at a specific significance level (e.g. the critical value of -1.96 corresponding to the 95 confidence level). If the value is not significant, there is no indication of diverging chains and the model should be converged.  
+
+```{r Evaluate convergence of the BVAR,eval = T,warnings = F}
+
+plot(mar)
+#summary(mar)
+
+# access convergence
+run_mcmc <- as.mcmc(mar, vars = "lambda")
+geweke.diag(run_mcmc)
+geweke.plot(run_mcmc)
+
+```
+
+So as we see in the "Geweke-plot", all the different z-scores should be mainly within the critical bounds of the z-score (dashed lines), which seems to be the case for the majority of iterations. 
+
+
+### 4. simulate new trajectories with VAR
+
+Now that we have the final BVAR-model, we will use it to generate new artificial time series. Therefore we just need new random noise, the fitted coefficients, the lag-order and the Variance-Covariance Matrix, to describe the interdependencies between the different covariates. When we have this, we add the trend back on to each time series. 
+
+```{r Get coefficients and Variance-Cov-Matrix,warnings = F,message = F}
+# simulate time series
+bvar_summary = summary(mar)
+BVAR_coefs = bvar_summary$coef # coefficients
+BVAR_vcov = bvar_summary$vcov # Variance-Covariance matrix
+```
+
+```{r plot VCov,message = F,echo = F,warnings = F,fig.asp = 0.5,fig.width = 15,fig.cap = "Coefficients & Variance Covariance matrix of the fitted BVAR model"}
+# check the fitted coefficients and Variance-Covariance matrix
+split.vars = cumsum(c(1,dim(PCs_Salt_trend.rm)[2],dim(PCs_SST_trend.rm)[2],
+                      dim(PCs_Currents_trend.rm)[2])) 
+
+
+col.scale = colorRampPalette(c(colorspace::sequential_hcl(n = 20,
+                                                          palette = "DarkMint"),"white",
+                               colorspace::sequential_hcl(n = 20,palette = "Peach",rev = T)))(1000)
+
+max.range = max(abs(range(BVAR_coefs)))
+val.to.col = seq(-max.range,max.range,length.out = 1000)
+
+
+par(mfrow = c(1,2),mar = c(2,3,3,3))
+# coefficients plot
+tmp = as.matrix(BVAR_coefs)
+class(tmp) = "matrix"
+tmp = raster(tmp)
+col.scale = colorRampPalette(c(colorspace::sequential_hcl(n = 20,
+                                                          palette = "DarkMint"),"white",
+                               colorspace::sequential_hcl(n = 20,palette = "Peach",rev = T)))(1000)
+
+max.range = max(abs(range(BVAR_coefs)))
+val.to.col = seq(-max.range,max.range,length.out = 1000)
+
+
+image(tmp,xlab = "",ylab = "",
+      yaxt = "n",xaxt = "n",col = col.scale[which(val.to.col >= cellStats(tmp,min) 
+                                                  & val.to.col <= cellStats(tmp,max))])
+box()
+#col.scale[col.match$nn.index])
+abline(v = (split.vars[-1]-1)/(dim(BVAR_coefs)[2]),lty = 2)
+abline(h = (dim(BVAR_coefs)[1]-split.vars)/(dim(BVAR_coefs)[1]),lty = 2)
+y.ticks = c(0.5,split.vars[-length(split.vars)] + diff(split.vars)*0.5)
+x.ticks = c((split.vars[-length(split.vars)]-1) + diff(split.vars)*0.5)
+x.upper.ticks = 1:dim(BVAR_coefs)[2]-0.5
+y.right.ticks = 1:dim(BVAR_coefs)[1]-0.5
+
+# draw axis
+axis(side = 1,at = x.ticks/(dim(BVAR_coefs)[2]),
+     labels = c("Salinity","SST","Currents"))
+axis(side = 2,at = (dim(BVAR_coefs)[1]-y.ticks)/(dim(BVAR_coefs)[1]),
+     labels = c("intercept","Salinity","SST","Currents"))
+axis(side = 3,at = x.upper.ticks/(dim(BVAR_coefs)[2]),
+     labels = colnames(BVAR_coefs),cex.axis = 0.4,tck = -0.01,padj = 1.5)
+axis(side = 4,at = y.right.ticks/(dim(BVAR_coefs)[1]),
+     labels = rev(rownames(BVAR_coefs)),las = 1,cex.axis = 0.4,tck = -0.01,hadj = 0.3)
+# add title
+title("Coefficients",adj = 0,line = 1.5)
+## varcov-matrix
+tmp = as.matrix(BVAR_vcov)
+class(tmp) = "matrix"
+tmp = raster(tmp)
+
+max.range = max(abs(range(BVAR_vcov)))
+val.to.col = seq(-max.range,max.range,length.out = 1000)
+
+split.vars = cumsum(c(dim(PCs_Salt_trend.rm)[2],dim(PCs_SST_trend.rm)[2],
+                      dim(PCs_Currents_trend.rm)[2])) 
+
+image(tmp,
+      yaxt = "n",xaxt = "n",col = col.scale[which(val.to.col >= cellStats(tmp,min) 
+                                                  & val.to.col <= cellStats(tmp,max))])
+box()
+#col.scale[col.match$nn.index])
+abline(v = (split.vars)/(dim(BVAR_vcov)[2]),lty = 2)
+abline(h = (dim(BVAR_vcov)[1]-split.vars)/(dim(BVAR_vcov)[1]),lty = 2)
+y.ticks = c(c(0,split.vars[-length(split.vars)]) + diff(c(0,split.vars))*0.5)
+x.ticks = c(c(0,split.vars[-length(split.vars)]) + diff(c(0,split.vars))*0.5)
+x.upper.ticks = 1:dim(BVAR_vcov)[2]-0.5
+y.right.ticks = 1:dim(BVAR_vcov)[1]-0.5
+
+# draw axis
+axis(side = 1,at = x.ticks/(dim(BVAR_vcov)[2]),
+     labels = c("Salinity","SST","Currents"))
+axis(side = 2,at = (dim(BVAR_vcov)[1]-y.ticks)/(dim(BVAR_vcov)[1]),
+     labels = c("Salinity","SST","Currents"))
+axis(side = 3,at = x.upper.ticks/(dim(BVAR_vcov)[2]),
+     labels = colnames(BVAR_vcov),cex.axis = 0.4,tck = -0.01,padj = 1.5)
+axis(side = 4,at = y.right.ticks/(dim(BVAR_vcov)[1]),
+     labels = rev(rownames(BVAR_vcov)),las = 1,cex.axis = 0.4,tck = -0.01,hadj = 0.3)
+# add title
+title("Variance-Covariance",adj = 0,line = 1.5)
+
+```
+
+### 5. Sanity checks of the BVAR simulated time series{#subchapter5}
+
+Now we just simulate new trajectories (100 realisations) and check their behaviour, by comparing them visually with the original time series (done exemplary for the first time series (PC) of the spatial fields) and also comparing the behaviour of the Autocorrelation function (ACF). If the simulated time series are comparable in magnitude and autocorrelation, we are good to go on.  
+
+```{r Simulate from the BVAR model & eval result,message = F,warnings = F}
+# sample starting values
+index.start = sample(1:nrow(y.trend.rm),1,replace = T)
+start.val = t(y.trend.rm[index.start,])
+
+# simulate new trajectories with the specified properties
+y.sim = VAR.sim(B = t(BVAR_coefs),varcov = BVAR_vcov,n = nrow(y.trend.rm),
+                lag = 1,starting = start.val)
+
+# check difference in simulated time series
+y.sim_list = list()
+acf_list = list()
+for(i in 1:100){
+  index.start = sample(1:nrow(y.trend.rm),1,replace = T)
+  start.val = t(y.trend.rm[index.start,])
+  y.sim_list[[i]] = VAR.sim(B = t(bvar_summary$coef),varcov = bvar_summary$vcov,n = nrow(y.trend.rm),
+                            lag = 1,starting = start.val)
+  # check the acf
+  acf_list[[i]] = acf(y.sim_list[[i]][,1],plot = F)
+}
+par(mfrow = c(1,1))
+plot(EOF.Salinity$time,y.sim_list[[1]][,1],col = "gray50",type = "l",ylab = "",xlab = "time",
+     ylim = range(y.sim_list[[1]][,1])*1.5)
+title("Comparison of obs. vs. sim. time series",adj = 0)
+for(i in 1:100){
+  lines(EOF.Salinity$time,y.sim_list[[i]][,1],col = "gray70")  
+}
+lines(EOF.Salinity$time,y.trend.rm[,1],col = "black",lwd = 1.7)
+legend("topleft",c("observed","simulated"),col = c("black","gray70"),bty = "n",lwd = 2)
+# check acf
+acfs = do.call(cbind,lapply(acf_list,function(x) x$acf))
+acfs_melt = melt(acfs)
+acfs_quant = ddply(acfs_melt,c("Var1"),summarise,
+                   mean = mean(value),
+                   median = median(value),
+                   q05 = quantile(value,0.05),
+                   q95 = quantile(value,0.95))
+acfs_quant$Var1 = 0:30
+
+# plot
+ggplot(acfs_quant) + 
+  geom_ribbon(aes(x = Var1,ymin = q05,ymax = q95),alpha = 0.5, fill = "red",col = NA) + 
+  geom_segment(aes(x = Var1,xend = Var1,y = mean,yend = 0),col = "red") + 
+  geom_point(aes(x = Var1,y = mean,col = "simulated")) + 
+  geom_point(data = data.frame(mean = acf(y.trend.rm[,1],plot = F)$acf,Var1 = 0:30),
+             aes(x = Var1,y = mean,col = "observed")) +
+  geom_segment(data = data.frame(mean = acf(y.trend.rm[,1],plot = F)$acf,Var1 = 0:30),
+               aes(x = Var1,xend = Var1,y = mean,yend = 0),col = "black") + 
+  scale_colour_manual(values = c("black","red")) +
+  xlab("lag") + 
+  ylab("ACF") + 
+  ggtitle("ACF observed vs. simulated") + 
+  guides(colour = guide_legend(title="ACF")) + 
+  theme_bw() # looks ok for this acf
+
+
+# add the trend back on
+y.sim_trend = y.sim + cbind(PCs_Salt_trend,PCs_SST_trend,
+                            PCs_Currents_trend)
+
+```
+
+Additionally, the BVAR approach should conserve the (linear) dependencies between the diffrent variables. Therefore we could check the Cross-correlation function (CCF) of the observed vs. simulated time series visually and check if the correlations at certain lags are preserved in the simulated time series. We do this for a few exemplary time series pairs here, as it is quite cumbersome to examine the whole 51x51 combinations. 
+
+As an alternative we could examine the Cross- power-spectral density (CPSD) in the frequency domain and derive a metric that measures the deviation (e.g. mean absolute error (MAE)) between the observed CPSD and the mean CPSD of all simulated realisations. If it is approximately the same pattern, with same magnitude and approx. the same power on the same frequencies, we are fine. 
+
+```{r Check CCF and CPSD,message = F,warning = F,fig.width= 10,fig.asp = 0.8,cache = T}
+# get the names of all PCs in the y matrix
+PC.names = paste(c(rep("Salinity",ncol(PCs_Salt_trend.rm)),
+             rep("SST",ncol(PCs_SST_trend.rm)),
+             rep("Currents",ncol(PCs_Currents_trend.rm))),
+             colnames(y.trend.rm),sep = ".")
+
+
+# generate lookup-table for time series combinations
+lut = data.frame(ts1 = c(2,26,1),ts2 = c(15,12,2))
+plot.list = list()
+n = 1
+for(kk in 1:nrow(lut)){
+  ts1 = y.trend.rm[,lut[kk,1]]
+  ts2 = y.trend.rm[,lut[kk,2]]
+  ccf.obs = ccf_boot(diff(ts1),diff(ts2),lag.max = 20,plot = "none")
+  df.ccf.obs = data.frame(lag = ccf.obs$Lag,ccf = ccf.obs$r_P,
+                          lower = ccf.obs$lower_P,upper = ccf.obs$upper_P)
+  
+  df = list()
+  for(i in seq(y.sim_list)){
+    ts1_sim = y.sim_list[[i]][,lut[kk,1]]
+    ts2_sim = y.sim_list[[i]][,lut[kk,2]]
+    
+    # calc ccf of differenced time series
+    ccf.sim = ccf(diff(ts1_sim),diff(ts2_sim),lag.max = 20,plot = F)
+    # store
+    df[[i]] = data.frame(lag = ccf.sim$lag,ccf = ccf.sim$acf,iter = i)
+  }
+  df = do.call(rbind,df)
+  
+  # calc quantiles
+  ccfs_quant = ddply(df,c("lag"),summarise,
+                     mean = mean(ccf),
+                     median = median(ccf),
+                     q05 = quantile(ccf,0.05),
+                     q95 = quantile(ccf,0.95))
+  
+  # CCF plot and store
+  plot.list[[n]] = ggplot(ccfs_quant) + 
+    geom_ribbon(aes(x = lag,ymin = q05,ymax = q95),alpha = 0.5, fill = "red",col = NA) + 
+    geom_segment(aes(x = lag,xend = lag,y = mean,yend = 0),col = "red") + 
+    geom_point(aes(x = lag,y = mean),col = "red") + 
+    geom_point(data = df.ccf.obs,
+               aes(x = lag,y = ccf),col = "black") +
+    geom_segment(data = df.ccf.obs,
+                 aes(x = lag,xend = lag,y = ccf,yend = 0),col = "black") + 
+    geom_line(data = df.ccf.obs,
+              aes(x = lag,y = lower),col = "black",linetype = "dashed") + 
+    geom_line(data = df.ccf.obs,
+              aes(x = lag,y = upper),col = "black",linetype = "dashed") + 
+    geom_hline(yintercept = 0) + 
+    xlab("lag") + 
+    ylab("CCF") + 
+    ggtitle(paste("CCF",paste(PC.names[c(lut[kk,1],lut[kk,2])],collapse = "-"))) + 
+    theme_bw() # looks ok for this acf
+  n = n+1
+  
+  # check the cross-spectral density
+  
+  ts.mat.obs = apply(cbind(ts1,ts2),2,diff)
+  
+  # get cpsd of observations
+  cpsd.obs = cpsd(x = ts.mat.obs,detrend = "none")
+  cpsd.obs = data.frame(freq = cpsd.obs$freq,cross = as.numeric(cpsd.obs$cross))
+  
+  df.cpsd.sim = list()
+  for(i in seq(y.sim_list)){
+    ts.mat.sim = apply(y.sim_list[[i]][,c(lut[kk,1],lut[kk,2])],2,diff)
+    cpsd.sim = cpsd(x = ts.mat.sim,detrend = "none")
+    # store
+    df.cpsd.sim[[i]] = data.frame(freq = cpsd.sim$freq,
+                                  cross = as.numeric(cpsd.sim$cross),iter = i)
+  }
+  df.cpsd.sim = do.call(rbind,df.cpsd.sim)
+  
+  # calculate quantiles
+  cpsd_quant = ddply(df.cpsd.sim,c("freq"),summarise,
+                     mean = mean(cross),
+                     median = median(cross),
+                     q05 = quantile(cross,0.05),
+                     q95 = quantile(cross,0.95))
+
+  # CPSD plot
+  plot.list[[n]] = ggplot(cpsd_quant) + 
+    geom_ribbon(aes(x = freq,ymin = q05,ymax = q95),alpha = 0.5, fill = "red",col = NA) + 
+    geom_point(aes(x = freq,y = median,col = "simulated")) + 
+    geom_line(aes(x = freq,y = median),col = "red") + 
+    geom_point(data = cpsd.obs,
+               aes(x = freq,y = cross,col = "observed")) +
+    geom_smooth(data = cpsd.obs,linetype = "dashed",se = F,method = "gam",formula = y ~ s(x, bs = "cs"),
+                aes(x = freq,y = cross),col = "black") +
+    geom_line(data = cpsd.obs,
+              aes(x = freq,y = cross),col = "black") +
+    scale_colour_manual(values = c("black","red")) +
+    xlab("freq") + 
+    ylab("CPSD") + 
+    ggtitle(paste("CPSD",paste(PC.names[c(lut[kk,1],lut[kk,2])],collapse = "-"))) + 
+    theme_bw() + 
+    guides(colour = guide_legend(title="Data type"))
+  n = n+1
+}
+# store and plot all together
+
+p = (plot.list[[1]] + plot.list[[2]]) / (plot.list[[3]] + plot.list[[4]]) /
+  (plot.list[[5]] + plot.list[[6]]) & theme(legend.position = "bottom")
+p = p +  plot_layout(guides = "collect")
+print(p)
+
+```
+
+To check if the Cross-Spektrum is sufficiently matched, I thought about a test, that compares the cross-spectrum of the observations with our simulated ones and a reference baseline. For the reference baseline I generated surrogate time series with the same autocorrelation of the original time series pair (iAAFT algorithm) independently, breaking possible interdependencies between them. Therefore their CCF and their CPSD are flat. If our BVAR simulations are now better performing (closer correspondence to the cross-spectrum of the observations) than the generated surrogates we can be sure to have captured some of the (linear) dependencies in the original data. If the surrogate and our BVAR simulated time series perform equally well and are not statistically different from the observations, we can on the other hand conclude that this particular time series pair has no dependencies. One would then plot a matrix, which summarises the significance of pairwise relationships and maybe the similarity of cross-spectra. However, since this test is rather time consuming due to the generation of several hundreds of surrogate time series, I did not included it in this tutorial though. 
+
+### 6. reconstruct new spatial fields from the simulated PCs
+
+Now that we have simulated new artificial time series, we need to reconstruct the original spatio-temporal fields. Therefore we join the subset of the generated time series, that comprise 80% of the explained variance of the original fields, with the remaining PCs from the whole EOF-decomposition and reconstruct the fields with all PCs.
+
+```{r Reconstruct new spatial-fields,message = F, results = 'hide', fig.width= 15,fig.asp = 1.1}
+# - split combined matrix into matrices of each single env. variable
+PCs_Salt_sim = y.sim_trend[,1:pcs.sal]
+PCs_SST_sim = y.sim_trend[,((1+pcs.sal):(pcs.sal+pcs.sst))]
+PCs_Currents_sim = y.sim_trend[,((1+pcs.sal+pcs.sst):(pcs.sal+pcs.sst+pcs.currents))]
+
+# - add other noise PCs
+x = EOF.Salinity$sp.PCA$x
+x[,1:ncol(PCs_Salt_sim)] <- as.matrix(PCs_Salt_sim)
+# - build
+Mat.Salt.sim = x %*% t(EOF.Salinity$sp.PCA$rotation)
+Mat.Salt.sim = scale(Mat.Salt.sim,center = -EOF.Salinity$sp.PCA$center,scale = F)
+coords = coordinates(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45)
+mat = as.matrix(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45)
+coords = coords[complete.cases(mat),]
+# check if the dimension of the coordinates match with the dimension of the matrix
+dim(coords)
+dim(t(Mat.Salt.sim))
+# create raster file
+Salt.sim_raster = rasterFromXYZ(cbind(coords,t(Mat.Salt.sim)))
+names(Salt.sim_raster) = names(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45)
+
+# check how a PCA would look like
+EOF.Salinity_sim = spatial.PCA(x = Salt.sim_raster,center = T,scale. = F,spatial.extent = extent(Salt.sim_raster))
+
+# compare EOFs & PCs
+par(mfrow = c(5,3),mar = c(1.3,1,2,1),oma = c(2,0,2,0))
+for(i in 1:10){
+  
+  dat.mat = as.data.frame(EOF.Salinity$raster[[i]])
+  sim.mat = as.data.frame(EOF.Salinity_sim$raster[[i]])
+  dat.mat.noNA = dat.mat[complete.cases(dat.mat),]
+  sim.mat.noNA = sim.mat[complete.cases(sim.mat),]
+  
+  # get the color scales right
+  col.scale = colorRampPalette(c(colorspace::sequential_hcl(n = 10,
+                                        palette = "Peach"),"white",
+                               colorspace::sequential_hcl(n = 10,palette = "DarkMint",rev = T)))(1000)
+  val.range = range(c(range(dat.mat,na.rm = T),
+                      range(sim.mat,na.rm = T)))
+  col.to.val = seq(min(val.range),max(val.range),length.out = 1000)
+  
+  NN.dat = FNN::get.knnx(data = col.to.val,
+                query = dat.mat.noNA,k = 1)
+  col.dat = col.scale[min(NN.dat$nn.index):max(NN.dat$nn.index)]
+  NN.sim = FNN::get.knnx(data = col.to.val,
+                     query = sim.mat.noNA,k = 1)
+  col.sim = col.scale[min(NN.sim$nn.index):max(NN.sim$nn.index)]
+  
+  # check the need to flip EOF-pattern
+  cor.flip = cor(dat.mat.noNA,sim.mat.noNA)
+  if(cor.flip < -0.2){
+    flip = -1
+  } else {
+    flip = 1
+  }
+  
+  
+  image(EOF.Salinity$raster[[i]],col = col.dat,las = 1)
+  maps::map(add = T,fill = T,col = "gray80")
+  box()
+  title(paste("Data",paste0("EOF",i),sep = "-"),adj = 0)
+  image(EOF.Salinity_sim$raster[[i]]*flip,col = col.sim,las = 1)
+  maps::map(add = T,fill = T,col = "gray80")
+  box()
+  title(paste("Sim",paste0("EOF",i),sep = "-"),adj = 0)
+  
+  # plot PCs
+   plot(EOF.Salinity$time,EOF.Salinity$sp.PCA$x[,i],type = "l",ylim = c(min(EOF.Salinity$sp.PCA$x[,i]),1.2*max(EOF.Salinity$sp.PCA$x[,i])))
+   lines(EOF.Salinity$time,EOF.Salinity_sim$sp.PCA$x[,i]*flip,col = "red")
+   title(paste0("PC",i),adj = 0)
+   legend("topleft",legend = c("original","simulated"),cex = 1.2,
+          col = c("black","red"),lwd = 2,bty = "n")
+   if(i%%5 == 0){
+     mtext("Comparison of the original vs. simulated spatial field in   EOF-space",side = 3,outer = T,line = 1,font = 2)
+   }
+   
+}
+```
+
+
+The output seems to look quite ok for our purpose. The main spatial pattern in the first EOFs match quite well with the original spatial field and the PC time series seem to follow the main trends in the data, with a similar autocorrelation structure and magnitude. 
+
+Now we check how it would look like if we build a seasonal averaged signal over the summer month (June, July, August - JJA):
+
+
+```{r Derive seasonal averaged ts from simulated data,results = 'hide',message = F,warnings = F,error=F}
+# check how it would look like if one builds seasonal signals
+Salt_JJA = calc.mean.over.Month(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,
+                                time = as.Date(sub("X","",names(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45)),"%Y.%m.%d"),
+                                month = 6:8)
+Salt.sim_JJA = calc.mean.over.Month(Salt.sim_raster,
+                                    time = as.Date(sub("X","",names(Salt.sim_raster)),"%Y.%m.%d"),
+                                    month = 6:8)
+time.Salt.JJA = as.numeric(sub("X","",names(Salt_JJA)))
+
+layout(mat = matrix(c(rep(1,2),2,3),nrow = 2,ncol = 2,byrow = T))
+par(mar = c(4,4,3,4))
+plot(time.Salt.JJA,cellStats(Salt_JJA,mean),type = "l",ylab = "mean anomalies",xlab = "time",main = "Comparison JJA Salinity signal")
+legend("bottomleft",c("original","simulated"),col = c("black","red"),lwd = 2,bty = "n")
+lines(time.Salt.JJA,cellStats(Salt.sim_JJA,mean),col = "red")
+acf(cellStats(Salt_JJA,mean),main = "ACF observations Salt-JJA")
+acf(cellStats(Salt.sim_JJA,mean),main = "ACF simulation Salt-JJA",col = "red")
+
+```
+
+The overlay of the two time series looks quite good, although the ACFs show a few differences especially for higher lags, with stronger autocorrelation in the simulated time series. 
+Comparison of the PCs reveal a few discrepancies in the autocorrelation functions, which I would regard as minor for the moment. If one really wants to check if this is a major issue, I would suggest simulating various (e.g. 100) realisations and comparing the overall mean and sd of the ACFs (see chapter ["Sanity checks"](#subchapter5). 
+
+```{r plot seasonal time series,results = 'hide',fig.asp=0.9,fig.width=15}
+# check EOFs
+EOF.Salt_JJA = spatial.PCA(Salt_JJA,center = T,spatial.extent = extent(Salt_JJA))
+Mat.Salt.sim = as.matrix(Salt.sim_JJA)
+Mat.Salt.sim = Mat.Salt.sim[complete.cases(Mat.Salt.sim),]
+dim(Mat.Salt.sim)
+EOF.Salt.sim_JJA = predict(EOF.Salt_JJA$sp.PCA,t(Mat.Salt.sim))
+
+par(mfcol = c(3,5))
+for(i in 1:5){
+  plot(EOF.Salt_JJA$time,EOF.Salt_JJA$sp.PCA$x[,i],type = "l",xlab = "",ylab = "time-index")
+  lines(EOF.Salt_JJA$time,EOF.Salt.sim_JJA[,i],col = "red")
+  title(paste0("PC",i),adj = 0)
+  acf(EOF.Salt_JJA$sp.PCA$x[,i],main = "Obs.")
+  acf(EOF.Salt.sim_JJA[,i],col = "red",main = "Sim.")
+}
+```
+
+Now, that we have done this for the salinity field, we apply the same approach to the temperature & current fields. 
+
+```{r check the same for temperature,results = 'hide',message=F, fig.width= 15,fig.asp = 1.1}
+# check temperature
+# 5. build spatial field again
+# - add other noise PCs
+x = EOF.SST$sp.PCA$x
+x[,1:ncol(PCs_SST_sim)] <- as.matrix(PCs_SST_sim)
+# - build
+Mat.SST.sim = x %*% t(EOF.SST$sp.PCA$rotation)
+Mat.SST.sim = scale(Mat.SST.sim,center = -EOF.SST$sp.PCA$center,scale = F)
+coords = coordinates(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45)
+mat = as.matrix(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45)
+coords = coords[complete.cases(mat),]
+dim(coords)
+dim(t(Mat.SST.sim))
+SST.sim_raster = rasterFromXYZ(cbind(coords,t(Mat.SST.sim)))
+names(SST.sim_raster) = names(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45)
+
+# check how a PCA would look like
+EOF.SST_sim = spatial.PCA(x = SST.sim_raster,center = T,scale. = F,spatial.extent = extent(SST.sim_raster))
+
+# compare EOFs
+par(mfrow = c(5,3),mar = c(1.3,1,2,1),oma = c(0,0,2,0))
+for(i in 1:5){
+  
+  dat.mat = as.data.frame(EOF.SST$raster[[i]])
+  sim.mat = as.data.frame(EOF.SST_sim$raster[[i]])
+  dat.mat.noNA = dat.mat[complete.cases(dat.mat),]
+  sim.mat.noNA = sim.mat[complete.cases(sim.mat),]
+  
+  # get the color scales right
+  col.scale = colorRampPalette(c(colorspace::sequential_hcl(n = 10,
+                                                            palette = "Peach"),"white",
+                                 colorspace::sequential_hcl(n = 10,palette = "DarkMint",rev = T)))(1000)
+  val.range = range(c(range(dat.mat,na.rm = T),
+                      range(sim.mat,na.rm = T)))
+  col.to.val = seq(min(val.range),max(val.range),length.out = 1000)
+  
+  NN.dat = FNN::get.knnx(data = col.to.val,
+                         query = dat.mat.noNA,k = 1)
+  col.dat = col.scale[min(NN.dat$nn.index):max(NN.dat$nn.index)]
+  NN.sim = FNN::get.knnx(data = col.to.val,
+                         query = sim.mat.noNA,k = 1)
+  col.sim = col.scale[min(NN.sim$nn.index):max(NN.sim$nn.index)]
+  
+    # check the need to flip EOF-pattern
+  cor.flip = cor(dat.mat.noNA,sim.mat.noNA)
+  if(cor.flip < -0.2){
+    flip = -1
+  } else {
+    flip = 1
+  }
+  
+  image(EOF.SST$raster[[i]],col = col.dat)
+  maps::map(add = T)
+  title(paste("Data",paste0("EOF",i),sep = "-"),adj = 0)
+  image(EOF.SST_sim$raster[[i]]*flip,col = col.sim)
+  maps::map(add = T)
+  title(paste("Sim",paste0("EOF",i),sep = "-"),adj = 0)
+  
+   # plot PCs
+   plot(EOF.SST$time,EOF.SST$sp.PCA$x[,i],type = "l",ylim = c(min(EOF.SST$sp.PCA$x[,i]),1.2*max(EOF.SST$sp.PCA$x[,i])))
+   lines(EOF.SST$time,EOF.SST_sim$sp.PCA$x[,i]*flip,col = "red")
+   title(paste0("PC",i),adj = 0)
+   legend("topleft",legend = c("original","simulated"),cex = 1.2,
+          col = c("black","red"),lwd = 2,bty = "n")
+  # looks good
+}
+```
+
+
+```{r plot seasonal temp,results = 'hide',message=F,fig.asp=0.8,width = 10}
+# check how it would look like if one builds seasonal signals
+SST_JJA = calc.mean.over.Month(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,
+                               time = as.Date(sub("X","",names(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45)),"%Y.%m.%d"),
+                               month = 6:8)
+SST.sim_JJA = calc.mean.over.Month(SST.sim_raster,
+                                   time = as.Date(sub("X","",names(SST.sim_raster)),"%Y.%m.%d"),
+                                   month = 6:8)
+time.SST.JJA = as.numeric(sub("X","",names(SST_JJA)))
+
+layout(mat = matrix(c(rep(1,2),2,3),nrow = 2,ncol = 2,byrow = T))
+plot(time.SST.JJA,cellStats(SST_JJA,mean),type = "l",ylab = "mean anomalies",xlab = "time",main = "Comparison JJA SST signal")
+legend("topleft",c("original","simulated"),col = c("black","red"),lwd = 2,bty = "n")
+lines(time.SST.JJA,cellStats(SST.sim_JJA,mean),col = "red")
+acf(cellStats(SST_JJA,mean),main = "ACF observations SST-JJA")
+acf(cellStats(SST.sim_JJA,mean),main = "ACF simulation SST-JJA",col = "red")
+
+# check EOFs
+EOF.SST_JJA = spatial.PCA(SST_JJA,center = T,spatial.extent = extent(SST_JJA))
+Mat.SST.sim = as.matrix(SST.sim_JJA)
+Mat.SST.sim = Mat.SST.sim[complete.cases(Mat.SST.sim),]
+dim(Mat.SST.sim)
+EOF.SST.sim_JJA = predict(EOF.SST_JJA$sp.PCA,t(Mat.SST.sim))
+
+par(mfcol = c(3,5),mar = c(3,3,3,3))
+for(i in 1:5){
+  plot(EOF.SST_JJA$sp.PCA$x[,i],type = "l",xlab = "",ylab = "time-index")
+  lines(EOF.SST.sim_JJA[,i],col = "red")
+  title(paste0("PC",i),adj = 0)
+  acf(EOF.SST_JJA$sp.PCA$x[,i],main = "Obs.")
+  acf(EOF.SST.sim_JJA[,i],col = "red",main = "Sim.")
+}
+# looks good for temperature as well....
+```
+
+
+```{r check for currents,results = 'hide',message = F,warning = F, fig.width= 15,fig.asp = 1.1}
+
+# ----------------------------------------- #
+# check for currents
+# 5. build spatial field again
+# - add other noise PCs
+x = EOF.currents$sp.PCA$x
+x[,1:ncol(PCs_Currents_sim)] <- as.matrix(PCs_Currents_sim)
+# - build
+Mat.Currents.sim = x %*% t(EOF.currents$sp.PCA$rotation)
+Mat.Currents.sim = scale(Mat.Currents.sim,center = -EOF.currents$sp.PCA$center,scale = F)
+coords = coordinates(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u)
+mat = as.matrix(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u)
+coords = coords[complete.cases(mat),]
+dim(coords)
+dim(t(Mat.Currents.sim))
+Currents.sim_raster = list(u = rasterFromXYZ(cbind(coords,t(Mat.Currents.sim)[1:nrow(coords),])),
+                           v = rasterFromXYZ(cbind(coords,t(Mat.Currents.sim)[(1+nrow(coords)):ncol(Mat.Currents.sim),])))
+names(Currents.sim_raster$u) = names(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u)
+names(Currents.sim_raster$v) = names(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$v)
+
+
+# check how a PCA would look like
+EOF.currents_sim = spatial.PCA(x = Currents.sim_raster,center = T,scale. = F,spatial.extent = extent(Currents.sim_raster$u))
+
+# compare EOFs
+par(mfrow = c(5,3),mar = c(1,1,2,1))
+for(i in 1:10){
+  
+  u.dat = EOF.currents$raster[[1]][[i]]
+  v.dat = EOF.currents$raster[[2]][[i]]
+  u.sim = EOF.currents_sim$raster[[1]][[i]]
+  v.sim = EOF.currents_sim$raster[[2]][[i]]
+  
+  # compare current magnitude
+  dat.mat = as.data.frame(sqrt(u.dat^2 + v.dat^2))
+  sim.mat = as.data.frame(sqrt(u.sim^2 + v.sim^2))
+  dat.mat.noNA = dat.mat[complete.cases(dat.mat),]
+  sim.mat.noNA = sim.mat[complete.cases(sim.mat),]
+  
+  # get the color scales right (only sequential colorscale, since we have only positive flow magnitudes)
+  col.scale = colorRampPalette(colorspace::sequential_hcl(n = 10,
+                                                            palette = "Reds",rev = T))(1000)
+  val.range = range(c(range(dat.mat,na.rm = T),
+                      range(sim.mat,na.rm = T)))
+  col.to.val = seq(min(val.range),max(val.range),length.out = 1000)
+  
+  NN.dat = FNN::get.knnx(data = col.to.val,
+                         query = dat.mat.noNA,k = 1)
+  col.dat = col.scale[min(NN.dat$nn.index):max(NN.dat$nn.index)]
+  NN.sim = FNN::get.knnx(data = col.to.val,
+                         query = sim.mat.noNA,k = 1)
+  col.sim = col.scale[min(NN.sim$nn.index):max(NN.sim$nn.index)]
+  
+    # check the need to flip EOF-pattern
+  
+  uv.dat = unlist(rbind(as.data.frame(u.dat),as.data.frame(v.dat)))
+  uv.sim = unlist(rbind(as.data.frame(u.sim),as.data.frame(v.sim)))
+  
+  cor.flip = cor(uv.dat,uv.sim,use = "pairwise.complete.obs")
+  if(cor.flip < -0.2){
+    flip = -1
+  } else {
+    flip = 1
+  }
+  
+  image(sqrt(EOF.currents$raster[[1]][[i]]^2 + EOF.currents$raster[[2]][[i]]^2),col = col.dat)
+  # vectorField(v = v[,3],u = u[,3],xpos = v$x,ypos  =v$y,headspan = 0.03,scale = 0.2)
+  maps::map(add = T)
+  title(paste("Data",paste0("EOF",i),sep = "-"),adj = 0)
+  image(sqrt(EOF.currents_sim$raster[[1]][[i]]^2 + EOF.currents_sim$raster[[2]][[i]]^2),col = col.sim)
+  # vectorField(v = v.sim[,3],u = u.sim[,3],xpos = v.sim$x,ypos  =v.sim$y,headspan = 0.03,scale = 0.2)
+  maps::map(add = T)
+  title(paste("Sim",paste0("EOF",i),sep = "-"),adj = 0)
+  
+   # plot PCs
+   plot(EOF.currents$time,EOF.currents$sp.PCA$x[,i],type = "l",ylim = c(min(EOF.currents$sp.PCA$x[,i]),1.2*max(EOF.currents$sp.PCA$x[,i])))
+   lines(EOF.currents$time,EOF.currents_sim$sp.PCA$x[,i]*flip,col = "red")
+   title(paste0("PC",i),adj = 0)
+   legend("topleft",legend = c("original","simulated"),cex = 1.2,
+          col = c("black","red"),lwd = 2,bty = "n")
+  # looks good
+}
+```
+
+
+```{r plot seasonal avg. current fields,results = 'hide',message = F,warning = F,fig.asp = 1,fig.width = 7}
+
+# check how it would look like if one builds seasonal signals
+Currents_JJA = lapply(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45,function(x) calc.mean.over.Month(x,
+                               time = as.Date(sub("X","",names(x)),"%Y.%m.%d"),
+                               month = 6:8))
+Currents.sim_JJA = lapply(Currents.sim_raster,function(x) calc.mean.over.Month(x,
+                                   time = as.Date(sub("X","",names(x)),"%Y.%m.%d"),
+                                   month = 6:8))
+time.Currents.JJA = as.numeric(sub("X","",names(Currents_JJA$u)))
+
+layout(mat = matrix(c(rep(1,2),rep(2,2),3,4,5,6),nrow = 2,ncol = 4,byrow = T))
+# u
+plot(time.Currents.JJA,cellStats(Currents_JJA$u,mean),type = "l",ylab = "u mean anomalies",xlab = "time",main = "Comparison JJA u-Currents signal",ylim = c(2*min(cellStats(Currents_JJA$u,mean)),max(cellStats(Currents_JJA$u,mean))))
+legend("bottomleft",c("original","simulated"),col = c("black","red"),lwd = 2,bty = "n")
+lines(time.Currents.JJA,cellStats(Currents.sim_JJA$u,mean),col = "red")
+# v
+plot(cellStats(Currents_JJA$v,mean),type = "l",ylab = "v mean anomalies",main = "Comparison JJA v-Currents signal",ylim = c(2*min(cellStats(Currents_JJA$u,mean)),max(cellStats(Currents_JJA$u,mean))))
+legend("bottomleft",c("original","simulated"),col = c("black","red"),lwd = 2,bty = "n")
+lines(cellStats(Currents.sim_JJA$v,mean),col = "red")
+# u-acfs
+acf(cellStats(Currents_JJA$u,mean),main = "ACF obs. u-Currents-JJA")
+acf(cellStats(Currents.sim_JJA$u,mean),main = "ACF sim. u-Currents-JJA",col = "red")
+# v-acfs
+acf(cellStats(Currents_JJA$v,mean),main = "ACF obs. v-Currents-JJA")
+acf(cellStats(Currents.sim_JJA$v,mean),main = "ACF sim. v-Currents-JJA",col = "red")
+
+
+# check EOFs
+EOF.Currents_JJA = spatial.PCA(Currents_JJA,center = T,spatial.extent = extent(Currents_JJA$u))
+Mat.Currents.sim = rbind(as.matrix(Currents.sim_JJA$u),as.matrix(Currents.sim_JJA$v))
+Mat.Currents.sim = Mat.Currents.sim[complete.cases(Mat.Currents.sim),]
+dim(Mat.Currents.sim)
+EOF.Currents.sim_JJA = predict(EOF.Currents_JJA$sp.PCA,t(Mat.Currents.sim))
+
+par(mfcol = c(3,2),mar = c(3,3,3,3))
+for(i in 1:10){
+  plot(EOF.Currents_JJA$sp.PCA$x[,i],type = "l")
+  lines(EOF.Currents.sim_JJA[,i],col = "red")
+  title(paste0("PC",i),adj = 0)
+  acf(EOF.Currents_JJA$sp.PCA$x[,i],main = "Obs.")
+  acf(EOF.Currents.sim_JJA[,i],col = "red",main = "Sim.")
+}
+# the autocorrelation is not perfect, but apart from that it
+# looks quite good!
+```
+
+## Build spatial BVAR using a self-made wrapper function{#chapter2}
+
+With the following two wrapper functions I tried to wrap up the step-by-step process of fitting a BVAR to spatial data and generating new realisations (needs parallelisation in order to be effective). The first function "fit.spatial.BVAR()" fits a BVAR model on the spatial data and the second function "sim.spatial.BVAR()" generates new realisations from a fitted BVAR-object (output of the first function) either in raster format or as a matrix. 
+
+```{r Build BVAR with the wrapper-function,message = F, warning = F,cache = T}
+# ==================================== #
+# wrapper function to fit a BVAR
+# Bayesian Vector autoregressive model
+# to spatial data
+# - used to capture dependencies in
+#   the climate projections of various
+#   oceanographic variables
+# - generate new "data" that follow a 
+#   certain autocorrelation and covariance
+#   structure found in the data
+# steps:
+# - remove the seasonal component by calculating anomalies
+# - perform EOF analysis per variable
+#   to have a lower dimensional space
+# - remove nonlinear, monotone trend
+# - fit BVAR
+# - simulate new trajectories with VAR
+# - generate new spatial fields from PCs
+# ==================================== #
+
+# 1. function to fit BVAR model on raster files
+fit.spatial.BVAR = function(raster,
+                            time_raster,
+                            PC.thresh = 0.8,
+                            lags = 1, n_draw = 10000, n_burn = 5000, n_thin = 1,
+                            lambda = bv_lambda(mode = 0.2, sd = 0.4, min = 0.0001, max = 5),
+                            alpha = bv_alpha(mode = 2, sd = 0.25, min = 1, max = 3),
+                            metropolis.h = bv_metropolis(scale_hess = 0.005, adjust_acc = TRUE,
+                                                         acc_lower = 0.25, acc_upper = 0.35, acc_change = 0.02),
+                            plot = T
+){
+  library(raster)
+  library(marmalaid)
+  library(BVAR)
+  library(coda)
+  
+  # helper function to remove nonlinear trend (via scam)
+  
+  nonlinear.Trend = function(time,ts,...){
+    library(mgcv)
+    library(scam)
+    data = data.frame(time,ts)
+    # check linear trend
+    lm.trend = lm(ts ~ time,data = data)$coefficients[[2]]
+    if(lm.trend >= 0){
+      # monotone increasing p-spline
+      formula = as.formula(paste("ts","s(time,bs = 'mpi')",sep = " ~ "))
+    } else{
+      # monotone decreasing p-spline
+      formula = as.formula(paste("ts","s(time,bs = 'mpd')",sep = " ~ "))
+    }
+    #formula = as.formula(paste("ts","s(time,bs = 'ps',m = c(3,2))",sep = " ~ "))
+    #mod = gam(formula,data = data[complete.cases(data),],family = gaussian(link = "identity"))
+    mod = scam(formula,data = data[complete.cases(data),],family = stats::gaussian(link = "identity"),...)
+    
+    return(predict(mod,newdata = data.frame(time = time)))
+  }
+  
+  
+  # 1. decompose via EOF-analysis
+  EOF_list = lapply(raster,function(x){
+    if(class(x) %in% c("Raster","RasterBrick","RasterStack")){
+      extent.x = extent(x)
+    } else {
+      extent.x = extent(x[[1]])
+    }
+    eof = spatial.PCA(x,center = T,scale. = F,
+                      spatial.extent = extent.x)
+    return(eof)})
+  # 2. select limited nr. of PCs
+  cum.var = sapply(EOF_list,
+                   function(x) which(cumsum(x$sp.PCA$sdev^2/sum(x$sp.PCA$sdev^2)) >= PC.thresh)[1])
+  PCs_select = do.call(cbind,lapply(1:length(EOF_list),
+                                    function(x) EOF_list[[x]]$sp.PCA$x[,1:cum.var[[x]]]))
+  # 3. remove non-linear trend
+  PCs_trend = apply(PCs_select,2,function(x) nonlinear.Trend(time = 1:length(x),ts = x,optimizer = "efs"))
+  PCs_select_trendRM = PCs_select - PCs_trend
+  
+  # additional scaling step to make the generation of new realisations easier and more stable
+  PCs_select_trendRM_scaled = scale(PCs_select_trendRM)
+  
+  
+  
+  # 4. fit BVAR model
+  # specify prior
+  mn <- bv_minnesota(lambda = lambda,
+                     alpha = alpha,var = 1e07)
+  priors <- bv_priors(hyper = "auto", mn = mn)
+  # metropolis-hastings
+  metropolis.h <- metropolis.h
+  
+  #fit BVAR
+  mar = bvar(data = PCs_select_trendRM_scaled,
+             lags = lags,
+             n_draw = n_draw, n_burn = n_burn, n_thin = n_thin,
+             priors = priors, mh = metropolis.h,verbose = T)
+  # plot 
+  if(plot == T){
+    plot(mar)
+  }
+  # diagnostics
+  BIC.mar = BIC(mar)
+  AIC.mar = AIC(mar)
+  # check convergence
+  run_mcmc <- as.mcmc(mar)
+  # test for convergence Geweke`s convergence diagnostic
+  convergence = apply(run_mcmc,2,geweke.diag)
+  df.convergence = data.frame(parameter = names(convergence),
+                              z.score = sapply(convergence,function(x) x$z))
+  df.convergence$p.value = 2*pnorm(-abs(df.convergence$z.score),
+                                   mean = 0, sd = 1, lower.tail = TRUE)
+  # add sign
+  df.convergence$sign = ifelse(df.convergence$p.value <= 0.05,"*",F)
+  df.convergence$converged = ifelse(df.convergence$p.value <= 0.05,F,T)
+  # different ordering
+  df.convergence = df.convergence[,c("parameter","converged","z.score","p.value","sign")]
+  
+  # 5. store everything to be used in further functions
+  bvar_summary = summary(mar)
+  coefficients = bvar_summary$coef
+  vcov = bvar_summary$vcov
+  
+  # 6. read out as list
+  out = list(BVAR_model = mar,
+             BVAR_coefficients = coefficients,
+             BVAR_vcov = vcov,
+             diagnostics = list(convergence.mcmc = df.convergence,
+                                fit = c(AIC = AIC.mar,
+                                        BIC = BIC.mar)),
+             EOFs = EOF_list,
+             nr_pcs_selected = cum.var,
+             y = PCs_select_trendRM_scaled,
+             scale = list(center = attributes(PCs_select_trendRM_scaled)[["scaled:center"]],
+                          scale = attributes(PCs_select_trendRM_scaled)[["scaled:scale"]]),
+             Trend = PCs_trend)
+  return(out)
+}
+
+# 2. function to generate new realisations from this model
+sim.spatial.BVAR = function(BVAR.fit,N.sim,L = NULL,return.raster = F,parallel = F,ncores = NULL){
+  # function arguments
+  # - BVAR.fit = object coming from the "fit.spatial.BVAR" function
+  # - N.sim = number of simulations
+  # L = time series length
+  # return.raster = if a raster file should be returned, otherwise only the matrices
+  
+  library(Rcpp)
+  library(Rcpp2doParallel)
+  library(tsDyn)
+  library(raster)
+  library(terra)
+  if(parallel == T){
+    library(parallel)
+    library(doSNOW)
+    library(foreach)
+  }
+  
+  # helper func
+  split.by.col = function(df,f){
+    list.spl = split.data.frame(t(df),f)
+    list.spl = lapply(list.spl,t)
+    return(list.spl)
+  }
+  
+  # 1. get coefficients and var-cov-matrix for a BVAR model
+  coefs = BVAR.fit$BVAR_coefficients
+  vcov = BVAR.fit$BVAR_vcov
+  lags = BVAR.fit$BVAR_model$meta$lags
+  scale.params = BVAR.fit$scale # scale parameters to bring back to original scale
+  y = BVAR.fit$y
+  split.vec = rep(1:length(BVAR.fit$nr_pcs_selected),BVAR.fit$nr_pcs_selected)
+  #split.pts = cumsum(BVAR.fit$nr_pcs_selected)
+  trend = BVAR.fit$Trend
+  if(is.null(L)){
+    L = nrow(y)
+  }
+  # 2. simulate/produce new realisations
+  vars_sim = list()
+  for(i in 1:N.sim){
+    # sample starting values (from the first 10% of data)
+    index.start = sample(1:ceiling(0.1*nrow(y)),1,replace = T)
+    # start index representing the one with the largest lag
+    start.val = matrix(y[index.start:(index.start+(lags-1)),],
+                       nrow = lags,ncol = ncol(y))
+    # simulate VAR
+    tmp = VAR.sim(B = t(coefs),n = L,lag = lags,starting = start.val,
+                  varcov = vcov)
+    # rescale
+    tmp = t(t(tmp)*scale.params[["scale"]] + scale.params[["center"]])
+    # add Trend back on 
+    vars_sim[[i]] = tmp + trend
+  }
+  
+  if(parallel == T){
+    # --- parallel mode --- #
+    if(is.null(ncores)){
+      ncores = detectCores(logical = F)-1
+    }
+    
+    # set up progress bar
+    ntasks <- length(vars_sim)
+    pb <- txtProgressBar(max = ntasks, style = 3)
+    progress <- function(n) setTxtProgressBar(pb, n)
+    
+    # set up parallel mode
+    cl = makeCluster(ncores,type = "SOCK")
+    registerDoSNOW(cl)
+    #registerDoParallel(cl)
+    
+    opts <- list(progress=progress)
+    
+    # split and add further PCs
+    par.out = foreach(n = 1:length(vars_sim),.combine = "list",
+                      .multicombine = T,.packages = c("raster","Rcpp","terra"),.options.snow = opts) %dopar% {
+                        spl = split.by.col(vars_sim[[n]],f = split.vec)
+                        
+                        # use C++ for fast matrix multiplication
+                        # (problem: needs to be defined on each worker, rather than globally for all...
+                        # or put into a R-package....)
+                        cppFunction(depends = c("RcppArmadillo","RcppEigen"),
+                                    'SEXP matMult_rcpp(Eigen::MatrixXd A, Eigen::MatrixXd B){
+                                     Eigen::MatrixXd C = A * B;
+                                     return Rcpp::wrap(C);
+                                     }')
+                        
+                        
+                        #vars_sim_Covar = list()
+                        vars_sim_Covar = vector("list",length(BVAR.fit$nr_pcs_selected))
+                        for(i in 1:length(BVAR.fit$nr_pcs_selected)){
+                          # add other PCs
+                          PCs.sim = BVAR.fit$EOFs[[i]]$sp.PCA$x
+                          PCs.sim[,1:ncol(spl[[i]])] = spl[[i]]
+                          # build spatial field
+                          Mat.sp.sim = matMult_rcpp(PCs.sim,t(BVAR.fit$EOFs[[i]]$sp.PCA$rotation))
+                          Mat.sp.sim = scale(Mat.sp.sim,center = -BVAR.fit$EOFs[[i]]$sp.PCA$center,scale = F)
+                          
+                          if(return.raster == F){
+                            vars_sim_Covar[[i]] = Mat.sp.sim
+                            cat(names(BVAR.fit$nr_pcs_selected)[i],"|",paste("iteration:",n),"\n")
+                          } else {
+                            # get coordinates and create raster
+                            ll = length(BVAR.fit$EOFs[[i]]$raster)
+                            if(class(BVAR.fit$EOFs[[i]]$raster) == "list" & ll > 1){
+                              rst.sim = vector("list",ll)
+                              spl.index = rep(1:ll,each = ncol(Mat.sp.sim)/ll)
+                              Mat.sp.sim_split = split.by.col(Mat.sp.sim,spl.index)
+                              for(ii in 1:ll){
+                                # use terra as it is faster
+                                tmp.mat = terra::as.data.frame(BVAR.fit$EOFs[[i]]$raster[[ii]])
+                                coords = coordinates(BVAR.fit$EOFs[[i]]$raster[[ii]])
+                                coords = coords[complete.cases(tmp.mat),]
+                                #rst.sim[[ii]] = rasterFromXYZ(cbind(coords,t(Mat.sp.sim_split[[ii]])))
+                                rst.sim[[ii]] = terra::rast(cbind(coords,t(Mat.sp.sim_split[[ii]])),
+                                                            type = "xyz",crs = "EPSG:4326")
+                                names(rst.sim[[ii]]) = BVAR.fit$EOFs[[i]]$time
+                                # load raster into workspace (pack)
+                                 rst.sim[[ii]] = terra::wrap(rst.sim[[ii]])
+                              }
+                            } else {
+                              tmp.mat = terra::as.data.frame(BVAR.fit$EOFs[[i]]$raster)
+                              coords = coordinates(BVAR.fit$EOFs[[i]]$raster)
+                              coords = coords[complete.cases(tmp.mat),]
+                              #rst.sim = rasterFromXYZ(cbind(coords,t(Mat.sp.sim)))
+                              rst.sim = terra::rast(cbind(coords,t(Mat.sp.sim)),
+                                                    type = "xyz",crs = "EPSG:4326")
+                              names(rst.sim) = BVAR.fit$EOFs[[i]]$time
+                            # load raster into workspace (pack)
+                             rst.sim = terra::wrap(rst.sim)
+                             }
+                            cat(names(BVAR.fit$nr_pcs_selected)[i],"|",paste("iteration:",n),"\n")
+                            # store in nested list
+                            vars_sim_Covar[[i]] = rst.sim
+                          }
+                        }
+                        # return from parallel calculations
+                        vars_sim_Covar
+                      }
+    close(pb)
+    stopCluster(cl)
+    # bring to same structure as in the serial mode
+    vars.sim_rst = vector("list",length(BVAR.fit$nr_pcs_selected))
+    for(n in 1:length(par.out)){
+      tmp = par.out[[n]]
+      for(i in 1:length(tmp)){
+        vars.sim_rst[[i]][[n]] = tmp[[i]]
+      }
+    }
+    names(vars.sim_rst) = names(BVAR.fit$nr_pcs_selected)
+    # and unpack the wrapped rasters coming from the nodes
+    vars.sim_rst = rapply(vars.sim_rst,f = rast,how = "list")
+    
+  } else {
+    # use C++ for fast matrix multiplication
+    cppFunction(depends = c("RcppArmadillo","RcppEigen"),
+                'SEXP matMult_rcpp(Eigen::MatrixXd A, Eigen::MatrixXd B){
+    Eigen::MatrixXd C = A * B;
+    return Rcpp::wrap(C);
+    }')
+    # --- serial mode --- #  
+    # split and add further PCs
+    vars.sim_rst = vector("list",length(BVAR.fit$nr_pcs_selected))
+    for(n in 1:length(vars_sim)){
+      spl = split.by.col(vars_sim[[n]],f = split.vec)
+      for(i in 1:length(BVAR.fit$nr_pcs_selected)){
+        # add other PCs
+        PCs.sim = BVAR.fit$EOFs[[i]]$sp.PCA$x
+        PCs.sim[,1:ncol(spl[[i]])] = spl[[i]]
+        # build spatial field
+        Mat.sp.sim = matMult_rcpp(PCs.sim,t(BVAR.fit$EOFs[[i]]$sp.PCA$rotation))
+        Mat.sp.sim = scale(Mat.sp.sim,center = -BVAR.fit$EOFs[[i]]$sp.PCA$center,scale = F)
+        
+        if(return.raster == F){
+          vars.sim_rst[[i]][[n]] = Mat.sp.sim
+          cat(names(BVAR.fit$nr_pcs_selected)[i],"|",paste("iteration:",n),"\n")
+        } else {
+          # get coordinates and create raster
+          ll = length(BVAR.fit$EOFs[[i]]$raster)
+          if(class(BVAR.fit$EOFs[[i]]$raster) == "list" & ll > 1){
+            rst.sim = vector("list",ll)
+            spl.index = rep(1:ll,each = ncol(Mat.sp.sim)/ll)
+            Mat.sp.sim_split = split.by.col(Mat.sp.sim,spl.index)
+            for(ii in 1:ll){
+              # use terra as it is faster than raster
+              tmp.mat = terra::as.data.frame(BVAR.fit$EOFs[[i]]$raster[[ii]])
+              coords = coordinates(BVAR.fit$EOFs[[i]]$raster[[ii]])
+              coords = coords[complete.cases(tmp.mat),]
+              #rst.sim[[ii]] = rasterFromXYZ(cbind(coords,t(Mat.sp.sim_split[[ii]])))
+              rst.sim[[ii]] = terra::rast(cbind(coords,t(Mat.sp.sim_split[[ii]])), 
+                                          type = "xyz",crs = "EPSG:4326")
+              names(rst.sim[[ii]]) = BVAR.fit$EOFs[[i]]$time
+            }
+          } else {
+            tmp.mat = terra::as.data.frame(BVAR.fit$EOFs[[i]]$raster)
+            coords = coordinates(BVAR.fit$EOFs[[i]]$raster)
+            coords = coords[complete.cases(tmp.mat),]
+            #rst.sim = rasterFromXYZ(cbind(coords,t(Mat.sp.sim)))
+            rst.sim = terra::rast(cbind(coords,t(Mat.sp.sim)),
+                                  type = "xyz",crs = "EPSG:4326")
+            names(rst.sim) = BVAR.fit$EOFs[[i]]$time
+          }
+          cat(names(BVAR.fit$nr_pcs_selected)[i],"|",paste("iteration:",n),"\n")
+          # store in nested list
+          vars.sim_rst[[i]][[n]] = rst.sim
+        }
+      }
+    }
+    names(vars.sim_rst) = names(BVAR.fit$nr_pcs_selected)
+  }
+  # 3. write out/compress
+  # return
+  out.list = list(type = ifelse(return.raster == TRUE,"raster","matrix"),
+                  sims = vars.sim_rst)
+  return(out.list)
+}
+
+```
+
+### Fit spatial BVAR with wrapper approach
+
+```{r Fit BVAR-wrapper,message = F,results = 'hide',warnings = F,cache = F}
+
+time.POLCOM = sub("X","",names(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45))
+time.POLCOM = as.Date(time.POLCOM,"%Y.%m.%d")
+
+# fit a BVAR model of lag-order 1 to the data
+BVAR_wrapper_fit = fit.spatial.BVAR(raster = list(Salinity = POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,
+                               SST = POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,
+                               Currents = POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45),
+                 time_raster = time.POLCOM,
+                 PC.thresh = 0.8,
+                 lags = 1, n_draw = 10000, n_burn = 5000, n_thin = 1,plot = T)
+
+# check convergence
+BVAR_wrapper_fit$diagnostics
+```
+
+### Generate new fields from fitted BVAR-model with wrapper-approach
+
+Now we simulate 10 new realisations of the fitted BVAR-model and plot the avg. signal over the whole North Sea for SST, Salinity and the u-component of the Currents as a first check if everything went well.
+
+```{r Simulate from the BVAR model,message = F,results = 'hide',warnings = F,cache = F}
+# simulate 10 new realisations
+BVAR_wrapper_sims = sim.spatial.BVAR(BVAR.fit = BVAR_wrapper_fit,
+                                     N.sim = 10,
+                                     return.raster = T,
+                                     parallel = T,
+                                     ncores = 2)
+
+# check the avg. signal over the whole North Sea
+par(mfrow = c(1,3))
+plot(cellStats(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,mean),type = "l",xlab ="",ylab = "")
+for(i in 1:10){
+  lines(cellStats(brick(BVAR_wrapper_sims$sims$Salinity[[i]]),mean),col = "gray50")
+}
+lines(cellStats(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,mean),col = "black")
+title("Salinity anom.",adj = 0)
+
+plot(cellStats(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,mean),
+     type = "l",xlab = "",ylab = "")
+for(i in 1:10){
+  lines(cellStats(brick(BVAR_wrapper_sims$sims$SST[[i]]),mean),col = "gray50")
+}
+lines(cellStats(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,mean),col = "black")
+title("SST anom.",adj = 0)
+plot(cellStats(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u,mean),
+     type = "l",xlab ="",ylab = "")
+for(i in 1:10){
+  lines(cellStats(brick(BVAR_wrapper_sims$sims$Currents[[i]][[1]]),mean),col = "gray50")
+}
+lines(cellStats(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u,mean),col = "black")
+title("Currents-u anom.",adj = 0)
+```
+
+## References
+
