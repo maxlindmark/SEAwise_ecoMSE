@@ -63,3 +63,7 @@ data/
 
 # do not sink html files
 *.html
+
+# don`t sink cache of bias-correction tutorial
+/bias_correction/Bias_correction_tutorial_cache/
+/bias_correction/Bias_correction_tutorial_files/
