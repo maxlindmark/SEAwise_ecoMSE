@@ -1,0 +1,1014 @@
+---
+title: "Bias correction of climate projections"
+author: "Bernhard Kuehn"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  html_document:
+    toc: true
+    theme: united 
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Often historical data used for fitting environment-species relationships and climate projections do not originate from the same data source. There could be a considerable offset between historical environmental data and climate projections. To match both of these datasets to the same scale, bias correction is needed. 
+In this tutorial, I will explain a few relatively simple ways on how to do this, namely mean-bias correction, often termed delta-correction and a form of quantile mapping.
+
+## Required packages to run this tutorial 
+
+In order to execute the code in this tutorial you should have the following packages installed:
+
+- CRAN: [raster](https://cran.r-project.org/web/packages/raster/index.html), [maptools](https://cran.r-project.org/web/packages/maptools/index.html), [maps](https://cran.r-project.org/web/packages/maps/), [rgeos](https://cran.r-project.org/web/packages/rgeos/), [reshape2](https://cran.r-project.org/web/packages/reshape2/index.html), [qmap](https://cran.r-project.org/web/packages/qmap/index.html),
+[ggplot2](https://cran.r-project.org/web/packages/ggplot2/index.html),
+[devtools](https://cran.r-project.org/web/packages/devtools/index.html),
+[foreach](https://cran.r-project.org/web/packages/foreach/index.html),
+[doParallel](https://cran.r-project.org/web/packages/doParallel/index.html)
+
+- github: [marmalaid](https://github.com/BernhardKuehn/marmalaid) 
+
+```{r Install packages,message=F,warning=F,eval=FALSE}
+
+install.packages( c("raster","terra","maps","reshape2","qmap","ggplot2","parallel","foreach","doParallel"))
+devtools::install_github("BernhardKuehn/marmalaid")
+# additionally some packages are already archived on CRAN, so you need to install the last available version
+devtools::install_version("maptools", version = "1.1.8", repos = "http://cran.us.r-project.org")
+devtools::install_version("rgeos", version = "0.6.4", repos = "http://cran.us.r-project.org")
+
+```
+
+```{r Load packages,message=F,warning=F}
+# for analysis
+library(raster)
+library(marmalaid)
+library(reshape2)
+library(maptools)
+library(maps)
+library(rgeos)
+library(qmap)
+library(ggplot2)
+library(parallel)
+library(foreach)
+library(doParallel)
+```
+
+## Download data
+
+The data for this tutorial can be downloaded directly from [figshare](https://figshare.com/articles/software/Tutorial_-_Ways_to_bias_correct_climate_projections/23514618). 
+
+```{r Download input data, message = F}
+# automatically download input files for the tutorial from figshare
+
+# url for the data for the tutorial on "bias correction"
+url = "https://figshare.com/ndownloader/files/41238387"
+
+# specify data to download
+fn <- "data.zip"
+# directory to store data (create data directory in the folder of each practical)
+fp <- "./"
+
+# (increase timeout for larger files)
+options(timeout = max(300, getOption("timeout")))
+# download
+download.file(url = url,file.path(fp,fn),mode = "wb")
+# unzip
+unzip(file.path(fp,fn),exdir = fp)
+# remove original zip-download
+unlink(file.path(fp,fn))
+```
+
+### Load data & helper functions
+
+We will use historical bottom temperature data for the North Sea, originating from the AHOI dataset and the POLCOM-ERSEM climate projections for RCP4.5 and RCP8.5. I already organised those datasets in an easy-to-work-with raster format, that I stored via RData-files. 
+
+```{r Load data, message = F}
+# load data
+load("./data/AHOI.v2.2/AHOI_BottomTemp_raster_1948_2020.RData")
+load("./data/POLCOM_ERSEM_projections/POLCOM_ERSEM_rcp45_BottomTemp_raster_2006_2099.RData")
+load("./data/POLCOM_ERSEM_projections/POLCOM_ERSEM_rcp85_BottomTemp_raster_2006_2099.RData")
+```
+
+In order, to be effective, I wrote a few helper functions that we will need later on for the bias-correction part. 
+
+```{r Load helper functions,message = F}
+# min-max scaler (scale between 0 and 1)
+min.max.scaler = function(x){
+  scale(x,min(x),max(x)-min(x))
+}
+
+# function to remove trend with intercept
+get.trend = function(x){
+  lx = 1:length(x)
+  predict(lm(x~lx))
+}
+
+# function to perform quantile mapping per grid cell and month
+qmap_month_grid = function(obs,
+                           pred,
+                           time.obs,
+                           time.pred,
+                           ncores,
+                           method = "RQUANT",
+                           wet.day = F,
+                           type = "linear2",...){
+  # ---------------------------------------------------------------- #
+  # function that performs quantile mapping columnwise on a matrix of 
+  # time series (cols - spatial dim, rows - temporal dim)
+  # correction is done on a monthly basis - matching only Jan.-dates,
+  # Feb.-dates and so on
+  # ---------------------------------------------------------------- #
+  #
+  # obs - historical matrix to base the correction on
+  # pred - projection matrix to correct
+  # time.obs - the Dates (rows) of the obs-matrix
+  # time.pred - the Dates (cols) of the pred-matrix
+  # ncores - number of cores to be used for the parallelisation
+  # method - quantile mapping method used for the qmap()-function
+  # wet.day - the wet.day correction, used only for precipitation correction (should be set to FALSE in our case)
+  # ... - further arguments passed to the qmap() function
+  
+  library(qmap)
+  library(parallel)
+  library(foreach)
+  library(doParallel)
+  
+  # dimension checks
+  if(ncol(obs) != ncol(pred)){
+    stop("Columns (spatial dimension) of 'obs' and 'pred' do not match!")
+  }
+  
+  # get month
+  m.obs = as.numeric(format(time.obs,"%m"))
+  m.pred = as.numeric(format(time.pred,"%m"))
+  month = range(c(range(m.obs),range(m.pred)))
+  pred_qmap = matrix(NA,nrow(pred),ncol(pred))
+  for(i in min(month):max(month)){
+    print(i)
+    indx.m.obs = which(m.obs == i)
+    indx.m.pred = which(m.pred == i)
+    obs_month = obs[indx.m.obs,]
+    pred_month = pred[indx.m.pred,]
+    pred_month_qmap = matrix(NA,nrow(pred_month),ncol(pred_month))
+    
+    cl = makeCluster(ncores)
+    registerDoParallel(cl)
+    pred_month_qmap = foreach(j =1:ncol(obs_month),.combine = cbind,.packages = "qmap",.inorder = T) %dopar%{
+      # fit qmap model
+      qmap = fitQmap(obs = obs_month[,j],
+                     mod = pred_month[,j],
+                     method = method,wet.day = wet.day,...)
+      out = doQmap(x = pred_month[,j],
+                   fobj = qmap,type = type)
+      out
+    }
+    stopCluster(cl)
+    pred_qmap[indx.m.pred,] = pred_month_qmap
+  }
+  return(pred_qmap)
+}
+
+```
+## step-by-step guide for bias correction
+
+
+### 1. pre-processing and data preperation
+
+As we do a bias-correction per grid-point, we need to ensure that the data sets have the same spatial scale. Therefore, I do a bit of cropping, remove parts that lie over land and check with an overlay if the datasets spatially match and keep only those parts that match. 
+
+```{r preprocess spatial data,message = F,results = 'hide',warning=F,error=F}
+
+# remove everything except the North Sea (Irish Sea, Kattegat)
+rm.IrishS1 = as(extent(-5.1,-2.5,51,56), 'SpatialPolygons')
+rm.IrishS2 = as(extent(-5.1,-4,50.4,52), 'SpatialPolygons')
+rm.Kattg1 = as(extent(9.7,13,52,56), 'SpatialPolygons')
+rm.Kattg2 = as(extent(10.2,13,52,57.7), 'SpatialPolygons')
+
+# set values where landmasses are to NA
+map.world = map(database = "world",fill =T,plot = F)
+IDs = sapply(strsplit(map.world$names, ":"), function(x) x[1])
+land.mask = map2SpatialPolygons(map.world, IDs=IDs, proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+CP <- as(extent(-20, 20, 40, 70), "SpatialPolygons")
+proj4string(CP) = CRS(proj4string(land.mask))
+land.mask.small = gIntersection(land.mask,CP,byid = T)
+
+# combine these to one polygon 
+NA.mask = union(union(bind(rm.IrishS1,rm.IrishS2),bind(rm.Kattg1,rm.Kattg2)),land.mask.small)
+crs(NA.mask) = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs" 
+
+# mask with polygons
+POLCOM_ERSEM_rcp45_BottomTemp_raster = mask(POLCOM_ERSEM_rcp45_BottomTemp_raster,mask = NA.mask,inverse = T,updatevalue = NA)
+POLCOM_ERSEM_rcp85_BottomTemp_raster = mask(POLCOM_ERSEM_rcp85_BottomTemp_raster,mask = NA.mask,inverse = T,updatevalue = NA)
+AHOI_BottomTemp_raster = mask(AHOI_BottomTemp_raster,mask = NA.mask,inverse = T,updatevalue = NA)
+
+par(mfrow = c(1,3),mar = c(2,2,3,2))
+image(AHOI_BottomTemp_raster,main = "AHOI Bottom-T Jan. 1948")
+maps::map(add = T)
+image(POLCOM_ERSEM_rcp45_BottomTemp_raster,main = "POLCOM/ERSEM RCP4.5 \nBottom-T Jan. 2006")
+maps::map(add = T)
+image(POLCOM_ERSEM_rcp45_BottomTemp_raster,main = "POLCOM/ERSEM RCP8.5 \nBottom-T Jan. 2006")
+maps::map(add = T)
+
+# resample to same resolution (0.2x0.2)
+POLCOM_ERSEM_rcp45_BottomTemp_raster = resample(POLCOM_ERSEM_rcp45_BottomTemp_raster,AHOI_BottomTemp_raster)
+POLCOM_ERSEM_rcp85_BottomTemp_raster = resample(POLCOM_ERSEM_rcp85_BottomTemp_raster,AHOI_BottomTemp_raster)
+```
+
+```{r remove non-overlapping gridcells,message = F,results = 'hide',warning=F,error=F}
+# ==================================== #
+# set equal number of landmasses to NA
+# ==================================== #
+
+# check the landmasses in the ensemble runs and the AHOI-data
+BottomTemp.polcom.rasters = list(rcp45 = POLCOM_ERSEM_rcp45_BottomTemp_raster,
+                          rcp85 = POLCOM_ERSEM_rcp85_BottomTemp_raster)
+
+par(mfrow = c(1,2),mar = c(2,2,2,2),oma = c(0,0,2,0))
+for(i in 1:length(BottomTemp.polcom.rasters)){
+  test1 = BottomTemp.polcom.rasters[[i]]
+  test1[!is.na(test1)] = 1
+  test2 = AHOI_BottomTemp_raster
+  test2[!is.na(test2)] = 2
+  
+  rgb.col = col2rgb("red",alpha = T)
+  col.transparent = rgb(rgb.col[[1]],rgb.col[[2]],rgb.col[[3]],alpha = 0.5*255,maxColorValue = 255)
+  image(test2[[1]],col = "olivedrab")
+  image(test1[[1]],col = col.transparent,add = T)
+  maps::map(add = T)
+  legend("bottomright",fill = c("olivedrab",col.transparent),legend = c("AHOI","POLCOM"),bty = "n")
+  title(names(BottomTemp.polcom.rasters)[i],adj = 0)
+}
+mtext("Comparison Overlap",side = 3,outer = T,font = 2)
+# not exact overlap!!!
+# take only grid-cells inot account where all datasets have data!!!
+
+# calculate overlay
+overlay.AHOI.POLCOM = overlay(stack(AHOI_BottomTemp_raster[[1]],brick(lapply(BottomTemp.polcom.rasters,function(x) x[[1]]))),
+                              fun = sum)
+overlay.AHOI.POLCOM[!is.na(overlay.AHOI.POLCOM)] = 1
+par(mfrow = c(1,1))
+image(overlay.AHOI.POLCOM,main = "Overlay mask")
+maps::map(add = T)
+
+BottomTemp_polcom_crop = lapply(BottomTemp.polcom.rasters,function(x) mask(x,mask = overlay.AHOI.POLCOM))
+AHOI.BottomTemp.crop = mask(AHOI_BottomTemp_raster,mask = overlay.AHOI.POLCOM)
+```
+
+### 2. Mean Bias correction
+
+For the first bias-correction method, the mean-bias correction or delta method, I match the mean of the historical data set with the mean of the projection per grid-cell. I will do this seperately per month, as I figured that for some datasets, the bias in the summer month is different as in the winter month. If the bias is the same throughout the year though, the monthly method should yield the same results as removing the bias on a yearly basis.
+One thing to decide on is the overlapping period to base the mean-removal on. If one does have a "historical" part of the projections, often termed "control run" namely the part without climate change happening, one could use the temporal overlap between this run and the historical observation data. If there is no such a "control run" (as it is the case for the POLCOM-ERSEM data in our case, or at least I do not have it available ;)), one can base the overlap on the most recent overlapping period. In our case, we have a overlap for the years 2006 - 2020, so we base our bias correction on this overlapping period. If one has information, about a specific trend or regime shift happening in the recent past, one could also manually define this overlaping period for bias correction. 
+
+```{r Mean bias correction,message = F,results = 'hide',warning=F,error=F}
+# perform Bias correction for overlap period
+time.ahoi = as.Date(sub("X","",names(AHOI.BottomTemp.crop)),"%Y.%m.%d")
+time.polcom = as.Date(sub("X","",names(BottomTemp_polcom_crop$rcp45)),"%Y.%m.%d")
+# overlap
+time.ahoi_overlap = time.ahoi[format(time.ahoi,"%Y%m") %in% format(time.polcom,"%Y%m")]
+time.polcom_overlap = time.polcom[format(time.polcom,"%Y%m") %in% format(time.ahoi,"%Y%m")]
+
+
+# mean of AHOI 2006:2017
+indx.AHOI = which(time.ahoi %in% time.ahoi_overlap)
+BottomTemp.AHOI_overlap = AHOI.BottomTemp.crop[[indx.AHOI]]
+
+BottomTemp_polcom.bias.rm = BottomTemp_polcom_crop 
+
+# for RCP4.5 and RCP8.5
+for(j in seq(BottomTemp_polcom_crop)){
+  
+  Bias.month = all.month.indx = list()
+  for(i in 1:12){
+    cat("Month:",month.abb[[i]],"\n")
+    indx.month.rcp4.5_8.5 = which(as.numeric(format(time.polcom_overlap,"%m")) == i)
+    indx.month.ahoi = which(as.numeric(format(time.ahoi_overlap,"%m")) == i)
+    # store all indexes for later
+    all.month.indx[[i]] = indx.month.rcp4.5_8.5
+    
+    # calculate mean
+    Bias.month[[i]] = mean(BottomTemp_polcom_crop[[j]][[indx.month.rcp4.5_8.5]] - BottomTemp.AHOI_overlap[[indx.month.ahoi]])
+    
+    # remove monthly Bias for projection run
+    index.rcp4.5_8.5.month.proj = which(as.numeric(format(time.polcom,"%m")) == i) 
+    for(jj in index.rcp4.5_8.5.month.proj){
+      BottomTemp_polcom.bias.rm[[j]][[jj]] = BottomTemp_polcom_crop[[j]][[jj]] - Bias.month[[i]]
+    }
+  }
+}
+
+```
+
+### 3. check Bias correction
+
+Ok, now that we have our bias corrected grids, we just check if everything worked fine and plot the mean of the corrected grids vs. the raw grids. Since, I will work later on with averaged fields over three-month time periods (winter - DJF, spring - MAM, summer - JJA, autumn - SON), I will derive averaged fields over those month and compare their spatial average and if the results look consistent. 
+
+```{r check mean-bias-correction results,message = F,results = 'hide',warning=F,error=F}
+
+# --------------------- #
+# check bias correction
+# --------------------- #
+
+par(mfrow = c(2,1),mar = c(2,2,3,2))
+# original data
+plot(time.ahoi,cellStats(AHOI.BottomTemp.crop,mean),ylim = c(5,14),las = 1,
+     type = "l",xlim = c(as.Date("1960-01-01"),as.Date("2100-01-01")),col = "black",xlab = "time",ylab = "BottomTemp [degree C]")
+title("Uncorrected data",adj = 0)
+# projections
+for(j in 1:2){
+  lines(time.polcom,
+        cellStats(BottomTemp_polcom_crop[[j]],mean),col = c("olivedrab","red")[j])
+}
+legend("topleft",c("hist","RCP4.5","RCP8.5"),col = c("black","olivedrab","red"),lty = 1,bty = "none")
+
+# bias corrected time series
+plot(time.ahoi,cellStats(AHOI.BottomTemp.crop,mean),
+     ylim = c(5,14),las = 1,
+     type = "l",xlim = c(as.Date("1960-01-01"),as.Date("2100-01-01")),col = "black",xlab = "time",ylab = "BottomTemp [degree C]")
+# projections
+for(j in 1:2){
+  lines(time.polcom,
+        cellStats(BottomTemp_polcom.bias.rm[[j]],mean),col = c("olivedrab","red")[j])
+}
+title("mean-bias-corrected data",adj = 0)
+# looks ok!                     
+
+# ------------------------- #
+# calculate seasonal means
+# ------------------------- 
+# ================================ #
+# calculate mean over month for seasons
+# DJF - Q1
+# MAM - Q2
+# JJA - Q3
+# SON - Q4
+# ============================================================== #
+
+month.codes = list(DJF = c(12,1,2),
+                   MAM = 3:5,
+                   JJA = 6:8,
+                   SON = 9:11)
+
+BottomTemp_polcom.bias.rm.month = BottomTemp_polcom.month = list()
+AHOI.month = list()
+for(j in seq(BottomTemp_polcom.bias.rm)){
+  
+  tmp.proj = BottomTemp_polcom.bias.rm[[j]]
+  BottomTemp_polcom.bias.rm.month[[j]] = BottomTemp_polcom.month[[j]] = list()
+  
+  for(i in 1:length(month.codes)) {
+    month = month.codes[[i]]
+    # for BottomTemp
+    BottomTemp_polcom.bias.rm.month[[j]][[i]] = calc.mean.over.Month(raster = tmp.proj,time = time.polcom,month = month,shiftYear = F)
+    BottomTemp_polcom.month[[j]][[i]] = calc.mean.over.Month(raster = BottomTemp_polcom_crop[[j]],time = time.polcom,month = month,shiftYear = F)
+    if(j == 1){
+      AHOI.month[[i]] = calc.mean.over.Month(raster = AHOI.BottomTemp.crop,time = time.ahoi,month = month,shiftYear = F)
+    }
+  }
+  # rename
+  names(BottomTemp_polcom.bias.rm.month[[j]]) = names(BottomTemp_polcom.month[[j]]) = names(month.codes) 
+}
+names(AHOI.month) = names(month.codes)
+names(BottomTemp_polcom.bias.rm.month) = names(BottomTemp_polcom.month) = names(BottomTemp_polcom.bias.rm)
+
+# ------------------- #
+# plot bias corrected
+# ------------------- #
+
+par(mfrow = c(2,2),oma = c(0,0,2,0))
+for(i in names(month.codes)){
+  plot(unique(as.numeric(format(time.ahoi,"%Y"))),
+       cellStats(AHOI.month[[i]],mean),type = "l",
+       col ="black",xlab = "time",ylab = "BottomTemp [degree C]",las = 1,xlim = c(1948,2099),ylim = range(cellStats(AHOI.month[[i]],mean))+c(-1,2))
+  if(i == "DJF"){
+    legend("topleft",c("hist","RCP4.5","RCP8.5"),
+           col = c("black","olivedrab","red"),lty = 1,bty = "none")
+  }
+  for(nn in 1:2){  
+    #lines(unique(as.numeric(format(BottomTemp_rcp4.5_8.5.ensembles.bias.rm$historical[[1]]$time,"%Y"))),cellStats(tmp.hist[[i]],mean),type = "l",col ="black")
+    lines(unique(as.numeric(format(time.polcom,"%Y"))),cellStats(BottomTemp_polcom.bias.rm.month[[nn]][[i]],mean),type = "l",col = c("olivedrab","red")[nn])
+    title(i, adj = 0)
+  }
+  mtext("Bias removed",3,line = 0,outer = T,cex = 1.2,font = 2)
+}
+# ------------------ #
+# not bias corrected
+# ------------------ #
+
+par(mfrow = c(2,2))
+for(i in names(month.codes)){
+  plot(unique(as.numeric(format(time.ahoi,"%Y"))),
+       cellStats(AHOI.month[[i]],mean),type = "l",
+       col ="black",xlab = "time",ylab = "BottomTemp [degree C]",las = 1,xlim = c(1948,2099),ylim = range(cellStats(AHOI.month[[i]],mean))+c(-1,2))
+    if(i == "DJF"){
+    legend("topleft",c("hist","RCP4.5","RCP8.5"),
+           col = c("black","olivedrab","red"),lty = 1,bty = "none")
+  }
+  for(nn in 1:2){  
+    #lines(unique(as.numeric(format(BottomTemp_rcp4.5_8.5.ensembles.bias.rm$historical[[1]]$time,"%Y"))),cellStats(tmp.hist[[i]],mean),type = "l",col ="black")
+    lines(unique(as.numeric(format(time.polcom,"%Y"))),cellStats(BottomTemp_polcom.month[[nn]][[i]],mean),type = "l",col = c("olivedrab","red")[nn])
+    title(i, adj = 0)
+  }
+  mtext("Raw data",3,line = 0,outer = T,cex = 1.2,font = 2)
+}
+```
+
+It seems, the bias correction also worked on the monthly level and the spatial-averages over three-month periods look ok!
+
+### 4. Quantile mapping
+
+Now we perform another bias-correction method, called quantile mapping. Briefly, this method tries not only to correct the mean-level (as we did earlier), but tries to match the statistical distribution of values for a certain correction period, via the empirical cumulative distribution function. This is particularly valuable, to match different variances between your historical and projection data, if you have evidence that the variance is under/overestimated in your projections. 
+
+In R several quantile mapping methods are implemented in the package 'qmap'. I found that the method 'RQuant' implementing Non-parametric quantile mapping using robust empirical quantiles, works reasonably well, at least for my purposes so far. As the package was written primarly for temperature and rainfall corrections over land, there is the option 'wet.day', for correction of wet days in precipitation. Make sure to toggle this to 'FALSE', otherwise you will get weird results. 
+
+For quantile mapping to work, you have to make both time series at least stationary in the mean, therefore we remove the trend, perform the qmap and add the trend back on. 
+
+Through trial and error with artificial data, I found the following steps to work reasonably well:
+
+1. decide on a time period to base the quantile mapping on - aka the 'correction time period' (normally the mutually overlapping period between historical data and projections, e.g. 2006 - 2020 or overlap between historical part and a control run)
+2. remove the individual trends from both the historical part and projection in this 'correction time period'
+3. perform Quantile mapping on this trend-corrected data
+4. remove the trend from the whole projection period (e.g. 2006 - 2100)
+5. apply this fitted Qmap-model to this trend corrected data for the whole projection period
+6. calculate the mean-bias (same as for the delta correction method above) for the chosen 'correction time period'
+7. add everything back together: the qmapped-projection - the mean bias + the projection trend
+
+For step 2 and 3, one could use also the trend corrected data of the whole projection period and skip step 4. 
+Following those steps should guaranty preservation of the trend in the data and approximately the same results for quantile mapping and simple mean-bias correction if there is no drastic change in the variance in the 'correction time period'. However, if there is a change in variance, it should correct for it.
+In a first version of the approach I did not account for the trend in the historical data, which could result in an inflated variance and a slight offset in the resulting qmapping if there is a historic trend. However this is taken into account now. 
+One problem though remains... If there are strong outliers in the historical data that deviate from the general distribution, quantile mapping will still try to match those quantiles, resulting in an increase/decrease of the maximum/minimum values in the projection. An option to overcome this problem is to increase the parameter 'nlls' (nearest neighbours, default setting: 10) in the RQUANT routine, so more points are taken into account when matching the quantile distributions effectively smoothing over those outliers. However, here a bit of trial and error is needed to find the correct values as increasing 'nlls' too much will result in the quantile mapping not having any effect. Another good way of doing this would be to leave out a part of the data in the overlapping period and optimising for the appropriate level of smoothing. However, this is not yet implemented. 
+
+For convenience I wrote a wrapper-function that does the quantile mapping per grid point. However, the trend removal/adding steps should be done manually before and after the routine. Although the code is already parallelized, it takes a bit of time (at least on my laptop). So grab a coffee and wait for it to finish...
+
+```{r Qmapping,message = F,results = 'hide',warning=F,error=F,cache=T}
+# -------------------- #
+# try quantile mapping
+# -------------------- #
+
+# for rcp4.5
+polcom.rcp45_df = as.data.frame(BottomTemp_polcom_crop$rcp45)
+indx.NA_polcom.rcp45 = apply(polcom.rcp45_df,1,function(x) any(is.na(x)))
+polcom.rcp45_df = polcom.rcp45_df[-which(indx.NA_polcom.rcp45==T),]
+coords_polcom.rcp45 = coordinates(BottomTemp_polcom_crop$rcp45)[-which(indx.NA_polcom.rcp45==T),]
+
+AHOI_df = as.data.frame(AHOI.BottomTemp.crop)
+AHOI_df = AHOI_df[complete.cases(AHOI_df),]
+# transform
+polcom.rcp45_df.t = t(polcom.rcp45_df)
+AHOI_df.t = t(AHOI_df)
+# remove trend per grid cell
+polcom.rcp45_df.t_noTrend = apply(polcom.rcp45_df.t,2,function(x) x - get.trend(x))
+
+# determine the correction period:
+# - either the overlapping period
+# - a self defined period
+# - or the complete historical part
+
+correction.period.type = 1
+if(correction.period.type == 1){
+  # use overlap period
+  time.ahoi_correction = time.ahoi[time.ahoi %in% time.ahoi_overlap]
+} else if(correction.period.type == 2){
+  time.ahoi.correction = time.ahoi[time.ahoi >= as.Date("2012-01-01")]
+  } else {
+  # use complete period
+  time.ahoi_correction = time.ahoi
+}
+
+# remove trend in historical correction period
+AHOI_df.t_noTrend = apply(AHOI_df.t[time.ahoi %in% time.ahoi_correction,],2,function(x) x - get.trend(x))
+# get mean-bias in the correction period
+mean.bias.45 = apply(polcom.rcp45_df.t[time.polcom %in% time.polcom_overlap,],2,mean)  - apply(AHOI_df.t[time.ahoi %in% time.ahoi_overlap,],2,mean)
+
+
+# check the cdfs
+# look at quantile distributions
+par(mfrow =c(1,1))
+plot(min.max.scaler(cumsum(hist(polcom.rcp45_df.t_noTrend,breaks = 100,plot = F)$density)),col = "red",xlab = "",ylab = "scaled ecdf",type = "b",pch = 16,lwd = 2)
+points(min.max.scaler(cumsum(hist(AHOI_df.t_noTrend,breaks = 100,plot = F)$density)),col = "black",type = "b",pch = 16,lwd = 2)
+title("Empirical cumulative distribution function",adj = 0)
+legend("bottomright",c("AHOI","POLCOM-ERSEM\nRCP4.5"),
+           col = c("black","red"),lwd = 2,pch = 16,lty = 1,bty = "n")
+# ---------------------------------------- #
+# perform qmapping per grid cell and month
+# ---------------------------------------- #
+
+polcom.rcp45_df_noTrend_qmap = qmap_month_grid(obs = AHOI_df.t_noTrend,
+                                               pred =  polcom.rcp45_df.t_noTrend,
+                                               time.obs = time.ahoi_correction,
+                                               time.pred = time.polcom,
+                                               method = "RQUANT",
+                                               type = "linear2",
+                                               nlls = 50,
+                                               nboot = 10,
+                                               qstep = 0.005,
+                                               wet.day = F,
+                                               ncores = 6)
+
+# add trend back on & correct for mean-bias offset
+polcom.rcp45_df_qmap = polcom.rcp45_df_noTrend_qmap
+for(i in 1:ncol(polcom.rcp45_df_qmap)){
+  # add trend back on
+  polcom.rcp45_df_qmap[,i] = polcom.rcp45_df_noTrend_qmap[,i] - mean.bias.45[i] + get.trend(polcom.rcp45_df.t[,i])
+}
+
+polcom.rcp45_qmap = rasterFromXYZ(data.frame(coords_polcom.rcp45,t(polcom.rcp45_df_qmap)))
+
+par(mfrow = c(1,1))
+plot(as.numeric(unique(format(time.ahoi,"%Y"))),cellStats(calc.mean.over.Month(AHOI.BottomTemp.crop,time = time.ahoi,month = 1:12),mean),type = "l",col= "black",xlim = c(1960,2099),ylim = c(5,11),xlab = "time",ylab = "avg. Bottom T [degree C]")
+lines(as.numeric(unique(format(time.polcom,"%Y"))),cellStats(calc.mean.over.Month(BottomTemp_polcom_crop$rcp45,time.polcom,1:12),mean),col = "blue",lwd = 2)
+lines(as.numeric(unique(format(time.polcom,"%Y"))),cellStats(calc.mean.over.Month(polcom.rcp45_qmap,time.polcom,1:12),mean),col = "orange",lwd = 2)
+lines(as.numeric(unique(format(time.polcom,"%Y"))),cellStats(calc.mean.over.Month(BottomTemp_polcom.bias.rm$rcp45,time.polcom,1:12),mean),col = "deeppink4",lwd = 2)
+abline(v = 2006,lty = 2)
+title("Comparision bias correction methods for RCP4.5",adj = 0)
+legend("bottomright",c("hist","raw RCP4.5","mean-bias-cor. RCP4.5",
+                       "qmap RCP4.5"),
+       col = c("black","blue","deeppink4","orange"),lty = 1,lwd = 2,bty = "n")
+
+# ---------- #
+# for rcp8.5
+# ---------- #
+
+polcom.rcp85_df = as.data.frame(BottomTemp_polcom_crop$rcp85)
+indx.NA_polcom.rcp85 = apply(polcom.rcp85_df,1,function(x) any(is.na(x)))
+polcom.rcp85_df = polcom.rcp85_df[-which(indx.NA_polcom.rcp85==T),]
+coords_polcom.rcp85 = coordinates(BottomTemp_polcom_crop$rcp85)[-which(indx.NA_polcom.rcp85==T),]
+
+# transform
+polcom.rcp85_df.t = t(polcom.rcp85_df)
+# remove trend per grid cell
+polcom.rcp85_df.t_noTrend = apply(polcom.rcp85_df.t,2,function(x) x - get.trend(x))
+# get mean-bias in the correction period
+mean.bias.85 = apply(polcom.rcp85_df.t[time.polcom %in% time.polcom_overlap,],2,mean) - apply(AHOI_df.t[time.ahoi %in% time.ahoi_overlap,],2,mean)
+
+
+# check the cdfs
+# look at quantile distributions
+par(mfrow =c(1,1))
+plot(min.max.scaler(cumsum(hist(polcom.rcp85_df.t_noTrend,breaks = 100,plot = F)$density)),col = "red",xlab = "",ylab = "scaled ecdf",type = "b",pch = 16,lwd = 2)
+points(min.max.scaler(cumsum(hist(AHOI_df.t_noTrend,breaks = 100,plot = F)$density)),col = "black",type = "b",pch = 16,lwd = 2)
+title("Empirical cumulative distribution function",adj = 0)
+legend("bottomright",c("AHOI","POLCOM-ERSEM\nRCP8.5"),
+           col = c("black","red"),lwd = 2,pch = 16,lty = 1,bty = "n")
+
+# ---------------------------------------- #
+# perform qmapping per grid cell and month
+# ---------------------------------------- #
+
+polcom.rcp85_df_noTrend_qmap = qmap_month_grid(obs = AHOI_df.t_noTrend,
+                                               pred = polcom.rcp85_df.t_noTrend,
+                                               time.obs = time.ahoi_overlap,
+                                               time.pred = time.polcom,
+					                                     method = "RQUANT",
+					                                     type = "linear2",
+                                               nlls = 50,
+                                               nboot = 10,
+                                               qstep = 0.005,
+                                               wet.day = F,
+                                               ncores = 6)
+
+# add trend back on 
+polcom.rcp85_df_qmap = polcom.rcp85_df_noTrend_qmap
+for(i in 1:ncol(polcom.rcp85_df_qmap)){
+  # add trend back on
+  polcom.rcp85_df_qmap[,i] = polcom.rcp85_df_noTrend_qmap[,i] - mean.bias.85[i] + get.trend(polcom.rcp85_df.t[,i])
+}
+
+polcom.rcp85_qmap = rasterFromXYZ(data.frame(coords_polcom.rcp85,t(polcom.rcp85_df_qmap)))
+
+par(mfrow = c(1,1))
+plot(as.numeric(unique(format(time.ahoi,"%Y"))),cellStats(calc.mean.over.Month(AHOI.BottomTemp.crop,time = time.ahoi,month = 1:12),mean),type = "l",col= "black",xlim = c(1960,2099),ylim = c(5,11),xlab = "time",ylab = "avg. Bottom T [degree C]")
+lines(as.numeric(unique(format(time.polcom,"%Y"))),cellStats(calc.mean.over.Month(BottomTemp_polcom_crop$rcp85,time.polcom,1:12),mean),col = "blue",lwd = 2)
+lines(as.numeric(unique(format(time.polcom,"%Y"))),cellStats(calc.mean.over.Month(polcom.rcp85_qmap,time.polcom,1:12),mean),col = "orange",lwd = 2)
+lines(as.numeric(unique(format(time.polcom,"%Y"))),cellStats(calc.mean.over.Month(BottomTemp_polcom.bias.rm$rcp85,time.polcom,1:12),mean),col = "deeppink4",lwd = 2)
+abline(v = 2006,lty = 2)
+title("Comparision bias correction methods for RCP8.5",adj = 0)
+legend("bottomright",c("hist","raw RCP8.5","mean-bias-cor. RCP8.5",
+                       "qmap RCP8.5"),
+       col = c("black","blue","deeppink4","orange"),lty = 1,lwd = 2,bty = "n")
+
+
+
+```
+
+Now we compare the different methods, see if they preserved the trends, corrected the variance and were able to get rid of the offset. 
+
+```{r check results of qmapping,message = F,results = 'hide',warning=F,error=F}
+
+# for RCP4.5
+polcom.rcp45_qmap_month = list()
+for(i in seq(month.codes)){
+  s = month.codes[[i]]
+  polcom.rcp45_qmap_month[[i]] = calc.mean.over.Month(polcom.rcp45_qmap,time.polcom,month = s,shiftYear = F)
+}
+names(polcom.rcp45_qmap_month) = names(month.codes)
+
+# check for different seasons
+par(mfrow = c(2,2),mar = c(2,2,3,2),oma = c(0,0,2,0))
+for(i in names(month.codes)){
+  plot(unique(as.numeric(format(time.ahoi,"%Y"))),
+       cellStats(AHOI.month[[i]],mean),type = "l",
+       col ="black",xlab = "time",ylab = "BottomTemp [degree C]",las = 1,xlim = c(1948,2099),ylim = range(cellStats(AHOI.month[[i]],mean))+c(-1,2))
+  mbr = cellStats(BottomTemp_polcom.bias.rm.month$rcp45[[i]],mean)
+  qmap = cellStats(polcom.rcp45_qmap_month[[i]],mean)
+  raw = cellStats(BottomTemp_polcom.month$rcp45[[i]],mean)
+  time.polcom.yr = unique(as.numeric(format(time.polcom,"%Y")))
+  lines(time.polcom.yr,mbr,type = "l",col = c("deeppink4"))
+  lines(time.polcom.yr,qmap,type = "l",col = c("orange"))
+  lines(time.polcom.yr,raw,type = "l",col = c("blue"))
+  title(i, adj = 0)
+  # fit trend to see if it is trend-preservering
+  trend.mbr = lm(mbr~time.polcom.yr)
+  trend.qmap = lm(qmap~time.polcom.yr)
+  trend.raw = lm(raw~time.polcom.yr)
+  cat(i,"|",trend.mbr$coefficients[[2]],trend.qmap$coefficients[[2]],trend.raw$coefficients[[2]],"\n")
+  lines(time.polcom.yr,predict(trend.mbr),col = "deeppink4",lty = 2)
+  lines(time.polcom.yr,predict(trend.qmap),col = "orange",lty = 2)
+  lines(time.polcom.yr,predict(trend.raw),col = "blue",lty = 2)
+}
+mtext("Comparison bias removal RCP4.5",3,line = 0,outer = T,cex = 1.2,font = 2)
+
+# for RCP8.5
+polcom.rcp85_qmap_month = list()
+for(i in seq(month.codes)){
+  s = month.codes[[i]]
+  polcom.rcp85_qmap_month[[i]] = calc.mean.over.Month(polcom.rcp85_qmap,time.polcom,month = s,shiftYear = F)
+}
+names(polcom.rcp85_qmap_month) = names(month.codes)
+
+# check for different seasons
+par(mfrow = c(2,2),mar = c(2,2,3,2),oma = c(0,0,2,0))
+for(i in names(month.codes)){
+  plot(unique(as.numeric(format(time.ahoi,"%Y"))),
+       cellStats(AHOI.month[[i]],mean),type = "l",
+       col ="black",xlab = "time",ylab = "BottomTemp [degree C]",las = 1,xlim = c(1948,2099),ylim = range(cellStats(AHOI.month[[i]],mean))+c(-1,2))
+  mbr = cellStats(BottomTemp_polcom.bias.rm.month$rcp85[[i]],mean)
+  qmap = cellStats(polcom.rcp85_qmap_month[[i]],mean)
+  raw = cellStats(BottomTemp_polcom.month$rcp85[[i]],mean)
+  time.polcom.yr = unique(as.numeric(format(time.polcom,"%Y")))
+  lines(time.polcom.yr,mbr,type = "l",col = c("deeppink4"))
+  lines(time.polcom.yr,qmap,type = "l",col = c("orange"))
+  lines(time.polcom.yr,raw,type = "l",col = c("blue"))
+  title(i, adj = 0)
+  # fit trend to see if it is trend-preservering
+  trend.mbr = lm(mbr~time.polcom.yr)
+  trend.qmap = lm(qmap~time.polcom.yr)
+  trend.raw = lm(raw~time.polcom.yr)
+  cat(i,"|",trend.mbr$coefficients[[2]],trend.qmap$coefficients[[2]],trend.raw$coefficients[[2]],"\n")
+  lines(time.polcom.yr,predict(trend.mbr),col = "deeppink4",lty = 2)
+  lines(time.polcom.yr,predict(trend.qmap),col = "orange",lty = 2)
+  lines(time.polcom.yr,predict(trend.raw),col = "blue",lty = 2)
+}
+mtext("Comparison bias removal RCP8.5",3,line = 0,outer = T,cex = 1.2,font = 2)
+
+```
+
+Comparing the mean-bias correction (dark purple) with the quantile mapping (orange) shows that the trend is preserved and the level is approximately the same with small deviations though. One thing to note is, however, the increase in variance in the quantile mapping for the projection periods, which is expectable given that we correct all quantiles, not only the mean. Still for some periods (SON), I would say the method does overestimate the variance quite a bit e.g. going to colder temperatures than observed historical levels, which seems strange. I think this is due to some historical outliers in the recent overlapping period, but so far I havent found a way to correct it, despite tweaking the qmap package parameters. So all in all, there might be a little more to this method than I personally understand. For going forward I would possible utilise the mean-bias correction in the case of temperature, as variance changes do not seem to drastic.  
+
+
+## Write out and store on the disk
+
+If everything is ok, we can now write it out. I like to have my spatial data organised as raster files that I store in the RData-format. For this to work, we need to read the raster into the current workspace, as raster files are normally, only stored on the disk. I would recommend this method only for small rasters with sizes up to a few hundred MB, otherwise storing it in a native raster-format, netcdf or tif is more efficient, I guess.  
+
+```{r write out,message = F,warning = F,fig.width= 10,fig.asp = 0.8}
+# --------- #
+# write out #
+# --------- #
+
+# write times as names in rasterfiles
+names(BottomTemp_polcom.bias.rm$rcp45) = names(BottomTemp_polcom.bias.rm$rcp85) = time.polcom
+names(polcom.rcp45_qmap) = names(polcom.rcp85_qmap) = time.polcom
+
+
+POLCOM_ERSEM_BottomTemp_raster_meanBiasRM = BottomTemp_polcom.bias.rm
+POLCOM_ERSEM_BottomTemp_raster_qmap = list(rcp45 = polcom.rcp45_qmap,
+                                    rcp85 = polcom.rcp85_qmap)
+
+POLCOM_ERSEM_BottomTemp_raster_meanBiasRM = lapply(POLCOM_ERSEM_BottomTemp_raster_meanBiasRM,readAll)
+POLCOM_ERSEM_BottomTemp_raster_qmap = lapply(POLCOM_ERSEM_BottomTemp_raster_qmap,readAll)
+
+save(POLCOM_ERSEM_BottomTemp_raster_meanBiasRM,file = "./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_BottomTemp_raster_meanBiasRM.RData")
+save(POLCOM_ERSEM_BottomTemp_raster_qmap,file = "./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_BottomTemp_raster_qmap.RData")
+
+```
+
+## An example with Variance change - Zooplankton
+
+In the case of Bottom temperature the differences between quantile mapping and mean-bias correction where only minor. However, in the case of Zooplankton Carbon (derived from the CPR dataset for the historical part) the differences between historical part and projection are quite fundamental.
+
+```{r load zooplankton data,message=F,warning=F,error=F,results='hide'}
+
+# load data
+load("./data/CPR_Zooplankton_historical/cpr_areas.Rdata")
+load("./data/CPR_Zooplankton_historical/CPR_Zooplankton_Carbon_1959_2018.RData")
+load("./data/POLCOM_ERSEM_projections/POLCOM_ERSEM_rcp45_Zooplankton_Carbon_raster_2006_2099.RData")
+load("./data/POLCOM_ERSEM_projections/POLCOM_ERSEM_rcp85_Zooplankton_Carbon_raster_2006_2099.RData")
+
+# reshape historical data
+CPR_Zooplankton_Carbon_yr = CPR_Zooplankton_Carbon_yr[complete.cases(CPR_Zooplankton_Carbon_yr),]
+ZooC_hist_yr = dcast(CPR_Zooplankton_Carbon_yr,year~Area,value.var = "CPR_index_JFMAMJJASOND")
+
+# mask with landmask polygons/erase Kattegat and Irish Sea
+POLCOM_ERSEM_rcp45_Zooplankton_Carbon_raster = mask(POLCOM_ERSEM_rcp45_Zooplankton_Carbon_raster,
+                                                    mask = NA.mask,inverse = T,updatevalue = NA)
+POLCOM_ERSEM_rcp85_Zooplankton_Carbon_raster = mask(POLCOM_ERSEM_rcp85_Zooplankton_Carbon_raster,
+                                                    mask = NA.mask,inverse = T,updatevalue = NA)
+
+
+# get time
+time.proj = as.Date(sub("X","",names(POLCOM_ERSEM_rcp45_Zooplankton_Carbon_raster)),format = "%Y.%m.%d")
+
+# extract different rasters based on the CPR standard areas
+cpr_area_names = cpr_areas$Name
+
+# overlay CPR areas with projection data
+par(mfrow = c(1,1))
+image(POLCOM_ERSEM_rcp45_Zooplankton_Carbon_raster,ylim = c(48,64),
+      xlim = c(-11,12),main = "CPR-areas")
+plot(cpr_areas,add = T,border = "red")
+midpoints_cpr = as.data.frame(cpr_areas)
+# lon, lat are incorrectly named, but displyed correctly...
+midpoints_cpr$meanLat = midpoints_cpr$meanLon = NA
+for(i in 1:nrow(midpoints_cpr)){
+  midpoints_cpr$meanLon[i] = mean(c(midpoints_cpr$minLat[i],
+                                    midpoints_cpr$maxLat[i]))
+  midpoints_cpr$meanLat[i] = mean(c(midpoints_cpr$minLon[i],
+                                    midpoints_cpr$maxLon[i]))
+  
+}
+box()
+text(x = midpoints_cpr$meanLon,y = midpoints_cpr$meanLat,
+     labels = midpoints_cpr$Name,cex = 1.2)
+maps::map(add = T)
+# a littlebit is missing for areas C01 (area > 10 degree E & south in the Kattegat)
+# and C04 (area > 10 degree W)
+
+```
+
+
+```{r process zooplankton data,message=F,warning=F,error=F,results='hide',fig.asp=1.2,fig.width=8,cache = T}
+
+ZooC_rcp45_cpr = ZooC_rcp85_cpr = list() 
+for(i in seq(cpr_area_names)){
+  print(i)
+  cprA = subset(cpr_areas,Name == cpr_area_names[i])
+  
+  # mask with CPR area
+  tmp45 = mask(POLCOM_ERSEM_rcp45_Zooplankton_Carbon_raster,
+       mask = cprA)
+  tmp85 = mask(POLCOM_ERSEM_rcp85_Zooplankton_Carbon_raster,
+               mask = cprA)
+  
+# put in list
+  ZooC_rcp45_cpr[[i]] = tmp45
+  ZooC_rcp85_cpr[[i]] = tmp85
+}
+names(ZooC_rcp45_cpr) = names(ZooC_rcp85_cpr) = cpr_area_names
+
+# check
+# RCP4.5
+par(mfrow = c(3,3),mar = c(2,2,3,2),oma = c(0,0,3,0))
+for(i in 1:length(ZooC_rcp45_cpr)){
+  image(ZooC_rcp45_cpr[[i]][[1]])
+  title(names(ZooC_rcp45_cpr)[i],adj = 0)
+  maps::map(add = T)
+}
+mtext("CPR areas cropped for RCP4.5",outer = T,cex = 1.2,font = 2)
+# # RCP8.5
+# par(mfrow = c(3,3),oma = c(0,0,3,0))
+# for(i in 1:length(ZooC_rcp85_cpr)){
+#   image(ZooC_rcp85_cpr[[i]][[1]])
+#   title(names(ZooC_rcp85_cpr)[i],adj = 0)
+#   maps::map(add = T)
+# }
+# mtext("RCP8.5",outer = T,cex = 1.2,font = 2)
+
+# calc annual means
+ZooC_rcp45_cpr_yr = lapply(ZooC_rcp45_cpr,function(x) calc.mean.over.Month(x,time = time.proj,1:12,shiftYear = F))
+ZooC_rcp85_cpr_yr = lapply(ZooC_rcp85_cpr,function(x) calc.mean.over.Month(x,time = time.proj,1:12,shiftYear = F))
+
+# unit is mol/m^3, however not for the control (already in mgC/m3)
+# convert mol/m^3 -> mg/m^3: conversion factor: molarity of carbon
+ZooC_rcp45_cpr_yr = lapply(ZooC_rcp45_cpr_yr,function(x) x*(12.0107*10^3))
+ZooC_rcp85_cpr_yr = lapply(ZooC_rcp85_cpr_yr,function(x) x*(12.0107*10^3))
+
+
+# calc spatial means
+ZooC_rcp45_cpr_yr_df = data.frame(year = as.numeric(unique(format(time.proj,"%Y"))),
+                                  do.call(cbind,lapply(ZooC_rcp45_cpr_yr,function(x) cellStats(x,mean))))
+ZooC_rcp85_cpr_yr_df = data.frame(year = as.numeric(unique(format(time.proj,"%Y"))),
+                                  do.call(cbind,lapply(ZooC_rcp85_cpr_yr,function(x) cellStats(x,mean))))
+
+time.hist_yr = ZooC_hist_yr$year
+time.proj_yr = ZooC_rcp45_cpr_yr_df$year
+
+```
+
+First we perform mean-bias correction and look at the problems associated with this dataset. 
+
+```{r ZooC mean-bias correction,message=F,warning=F,error=F,results='hide'}
+# -------------------------------- # 
+# Bias correction via mean-removal
+
+standard.areas = names(ZooC_rcp45_cpr_yr_df)[-which(names(ZooC_rcp45_cpr_yr_df) %in% "year")]
+
+ZooC_rcp45_cpr_yr_df_meanBiasRM = ZooC_rcp45_cpr_yr_df
+ZooC_rcp85_cpr_yr_df_meanBiasRM = ZooC_rcp85_cpr_yr_df
+
+par(mfrow = c(3,1),mar = c(2,2,3,2),oma = c(0,0,0,0))
+for(i in seq(standard.areas)+1){
+   # plot legend
+  if(i == length(standard.areas)+1){
+    plot(0, 0, type='n', bty='n', xaxt='n', yaxt='n')
+    legend("left",c("hist",
+               "raw RCP4.5",
+               "raw RCP8.5",
+               "mean-bias-cor RCP4.5",
+               "mean-bias-cor RCP8.5"),horiz = T,
+               x.intersp = 0.2,y.intersp = 0.1,
+               text.width = c(0.1,0.15,0.2,0.2,0.3),bty = "n",xjust=0, yjust=0,
+               lty = 1,lwd = 2,col = c("black","cyan3","maroon4","orange","red"))
+  } else{
+  area = standard.areas[i]
+  hist = ZooC_hist_yr[ZooC_hist_yr$year >= 2000,area]
+  proj45 = ZooC_rcp45_cpr_yr_df[ZooC_rcp45_cpr_yr_df$year >= 2000
+                              & ZooC_rcp45_cpr_yr_df <= max(ZooC_hist_yr$year),area]
+  proj85 = ZooC_rcp85_cpr_yr_df[ZooC_rcp85_cpr_yr_df$year >= 2000
+                                & ZooC_rcp85_cpr_yr_df <= max(ZooC_hist_yr$year),area]
+  bias45 =  mean(proj45,na.rm = T)  - mean(hist,na.rm = T)
+  bias85 = mean(proj85,na.rm = T) - mean(hist,na.rm = T)
+  
+  # plot
+  plot(ZooC_hist_yr$year,ZooC_hist_yr[,area],type = "l",xlim =c(1959,2099))
+  lines(ZooC_hist_yr$year,rep(mean(hist,na.rm = T),length(ZooC_hist_yr$year)),
+        lty = 2,col = "red")
+  lines(ZooC_rcp45_cpr_yr_df$year,
+        ZooC_rcp45_cpr_yr_df[,area],col = "cyan3")
+  lines(ZooC_rcp85_cpr_yr_df$year,
+        ZooC_rcp85_cpr_yr_df[,area],col = "maroon4")
+  # lines(ZooC_rcp45_cpr_yr_df$year,
+  #       ZooC_rcp45_cpr_yr_df[,area] - bias45,col = "red")
+  title(area,adj = 0)
+  # remove bias
+  ZooC_rcp45_cpr_yr_df_meanBiasRM[,area] = ZooC_rcp45_cpr_yr_df[,area] - bias45  
+  ZooC_rcp85_cpr_yr_df_meanBiasRM[,area] = ZooC_rcp85_cpr_yr_df[,area] - bias85  
+  
+  lines(ZooC_rcp45_cpr_yr_df_meanBiasRM$year,
+        ZooC_rcp45_cpr_yr_df_meanBiasRM[,area],col = "orange")
+  lines(ZooC_rcp85_cpr_yr_df_meanBiasRM$year,
+        ZooC_rcp85_cpr_yr_df_meanBiasRM[,area],col = "red")
+  # if(i == 1)
+  #   mtext("Mean bias removal",side = 3,outer = T, font = 2,line = 0)
+  }
+}
+```
+
+As we see, the mean & variance of the Zooplankton Carbon biomass time series for the projection period are way different than the historical period. Reasons for that might not only lie in a modelled bias from the POLCOM-ERSEM dataset, like we saw in the temperature dataset, but also in the way of aggregation of different Zooplankton groups in the CPR data vs. the model and/or a the general difference between the CPR data (different taxa groups/different catchability of the Zooplankton taxa) and modelled Zooplankton in the ERSEM model (three different zooplankton groups that are primarily distinguished by their size: heterotrophic nanoflagellates, microzooplankton and mesozooplankton). Still the CPR data is the best guess we can have for the dynamics of historical Zooplankton in the North Sea, extending sufficiently long into the past. 
+Mean-bias correction, will get the mean right, but will neglect the totally different scale of the two datasets. 
+
+```{r ZooC mean-bias results,message=F,warning=F,error=F,results='hide'}
+
+# plot
+ZooC_rcp45_MeanBiasRM_melt = melt(ZooC_rcp45_cpr_yr_df_meanBiasRM,id.vars = c("year"))
+ZooC_rcp45_MeanBiasRM_melt$period = "RCP4.5_meanBiasCorrection"
+ZooC_historical_melt = melt(ZooC_hist_yr,id.vars = c("year"))
+ZooC_historical_melt$period = "historical"
+ZooC_rcp45_melt = melt(ZooC_rcp45_cpr_yr_df,id.vars = c("year"))
+ZooC_rcp45_melt$period = "RCP4.5_raw"
+
+# join
+ZooC_hist_rcp45_MeanBiasRM = rbind(ZooC_rcp45_MeanBiasRM_melt,
+                                   ZooC_historical_melt,
+                                   ZooC_rcp45_melt)
+# 
+# ggplot(ZooC_hist_rcp45_MeanBiasRM,aes(x = year,y = value,colour = period,group = period)) + 
+#   geom_line() +
+#   facet_wrap(~variable)
+
+# check densities (distributions of bias corrected and not bias corrected vars)
+# for the historical part take only the recent period from 2000 on
+tmp = ZooC_hist_rcp45_MeanBiasRM[ZooC_hist_rcp45_MeanBiasRM$period == "historical" & 
+                               ZooC_hist_rcp45_MeanBiasRM$year >= 2000,]
+ZooC.tmp_density = rbind(tmp,ZooC_hist_rcp45_MeanBiasRM[ZooC_hist_rcp45_MeanBiasRM$period %in% c("RCP4.5_meanBiasCorrection","RCP4.5_raw"),])
+
+ZooC.tmp_density = ZooC.tmp_density[ZooC.tmp_density$variable %in% c("B01","B02","B04","C01","C02","C04","D01","D02","D03"),]
+
+ggplot(ZooC.tmp_density,aes(x = value,
+                            fill = period,
+                            colour = period,
+                            group = period)) + 
+  geom_density(alpha = 0.3) +
+  facet_wrap(~variable) +
+  theme_bw() + 
+  ggtitle("Densities of Mean-bias-Correction/raw/hist. data")
+
+```
+
+Now we perform bias correction via quantile mapping on the Zooplankton Carbon data and see if we can get better results. Since there is also a shift in the variance (e.g. in the region C02 and D02) within the historical time period, we need to be careful, which period of the historical data we use to correct for within the quantile mapping procedure. I assumed that the projected Zooplankton time series for RCP4.5 and RCP8.5 will more or less follow the variance we saw in the last couple years (later than the year 2000) and used this historical period for correction, following the rationale that a regime shift happened in the early 2000s (Djeghri et al. 2023, Alvarez- Fernandez et al. 2012,Beaugrand et al. 2014, Weijerman et al. 2005). 
+
+```{r ZooC qmapping,message=F,warning=F,error=F,results='hide'}
+# ---------------------------------------------- #
+# Bias correction via qmap + mb + trend removal
+
+standard.areas = names(ZooC_rcp45_cpr_yr_df)[-which(names(ZooC_rcp45_cpr_yr_df) %in% "year")]
+
+ZooC_rcp45_cpr_yr_df_qmapRM = ZooC_rcp45_cpr_yr_df
+ZooC_rcp85_cpr_yr_df_qmapRM = ZooC_rcp85_cpr_yr_df
+
+par(mfrow = c(4,1),mar = c(2,2,3,2),oma = c(0,0,2,0))
+for(i in seq(standard.areas)){
+  area = standard.areas[i]
+  hist = na.omit(ZooC_hist_yr[ZooC_hist_yr$year >= 2000,area])
+  proj45 = ZooC_rcp45_cpr_yr_df[,area]
+  proj85 = ZooC_rcp85_cpr_yr_df[,area]
+
+  # qmapping + trend removal (with intercept) and mean bias removal
+  qmap.yy = fitQmap(obs = hist - get.trend(hist),
+                    mod = proj45 - get.trend(proj45),method = "RQUANT",wet.day = FALSE)
+  proj45_qmap = doQmap(proj45 - get.trend(proj45),qmap.yy)
+  qmap.yy = fitQmap(obs = hist - get.trend(hist),
+                    mod = proj85 - get.trend(proj85),method = "RQUANT",wet.day = FALSE)
+  proj85_qmap = doQmap(proj85 - get.trend(proj85),qmap.yy)
+  
+  # # get mean bias
+   mean.bias.45 = mean(proj45) - mean(hist)
+   mean.bias.85 = mean(proj85) - mean(hist)
+  
+  # plot
+  plot(ZooC_hist_yr$year,ZooC_hist_yr[,area],type = "l",xlim =c(1959,2099),ylim = c(0,max(ZooC_hist_yr[,area],na.rm =T)))
+  lines(ZooC_hist_yr$year,rep(mean(hist,na.rm = T),length(ZooC_hist_yr$year)),lty = 2,col = "red")
+  lines(ZooC_rcp45_cpr_yr_df$year,
+        ZooC_rcp45_cpr_yr_df[,area],col = "cyan3")
+  lines(ZooC_rcp85_cpr_yr_df$year,
+        ZooC_rcp85_cpr_yr_df[,area],col = "maroon4")
+  title(area,adj = 0)
+  # remove bias
+  ZooC_rcp45_cpr_yr_df_qmapRM[,area] = proj45_qmap - mean.bias.45 + get.trend(proj45)
+  ZooC_rcp85_cpr_yr_df_qmapRM[,area] = proj85_qmap - mean.bias.85 + get.trend(proj85)
+  
+  lines(ZooC_rcp45_cpr_yr_df_qmapRM$year,
+        ZooC_rcp45_cpr_yr_df_qmapRM[,area],col = "orange")
+  lines(ZooC_rcp85_cpr_yr_df_qmapRM$year,
+        ZooC_rcp85_cpr_yr_df_qmapRM[,area],col = "red")
+
+}
+mtext("Quantile mapping correction",side = 3,outer = T, font = 2,line = 0.5)
+# ---- #
+# plot
+# ---- #
+
+ZooC_rcp45_qmapRM_melt = melt(ZooC_rcp45_cpr_yr_df_qmapRM,id.vars = c("year"))
+ZooC_rcp45_qmapRM_melt$period = "RCP4.5_qmap"
+ZooC_historical_melt = melt(ZooC_hist_yr,id.vars = c("year"))
+ZooC_historical_melt$period = "historical"
+ZooC_rcp45_melt = melt(ZooC_rcp45_cpr_yr_df,id.vars = c("year"))
+ZooC_rcp45_melt$period = "RCP4.5_raw"
+
+# join
+ZooC_hist_rcp45_biasrm = rbind(ZooC_rcp45_qmapRM_melt,ZooC_historical_melt,
+                               ZooC_rcp45_melt)
+
+# ggplot(ZooC_hist_rcp45_biasrm,aes(x = year,y = value,colour = period,group = period)) + 
+#   geom_line() +
+#   facet_wrap(~variable)
+
+# check densities (distributions of bias corrected and not bias corrected vars)
+# for the historical part take only the recent period from 2000 on
+tmp = ZooC_hist_rcp45_biasrm[ZooC_hist_rcp45_biasrm$period == "historical" & 
+                         ZooC_hist_rcp45_biasrm$year >= 2000,]
+ZooC.tmp_density = rbind(tmp,ZooC_hist_rcp45_biasrm[ZooC_hist_rcp45_biasrm$period %in% c("RCP4.5_qmap","RCP4.5_raw"),])
+
+ZooC.tmp_density = ZooC.tmp_density[ZooC.tmp_density$variable %in% c("B01","B02","B04","C01","C02","C04","D01","D02","D03"),]
+
+ggplot(ZooC.tmp_density,aes(x = value,
+                            colour = period,
+                            fill = period,
+                            group = period)) + 
+  geom_density(alpha = 0.3) +
+  facet_wrap(~variable) + 
+  theme_bw() + 
+  ggtitle("Densities of Qmap/raw/hist. data")
+```
+
+Now we write out the corrected Zooplankton time series for later analyis. 
+
+```{r Store on disk,message=F,warning=F,error=F,results='hide'}
+
+# ----------------------------------------------------------------- # 
+# write out:
+
+POLCOM_ERSEM_ZooC_qmap = list(rcp45 = ZooC_rcp45_cpr_yr_df_qmapRM,
+                                rcp85 = ZooC_rcp85_cpr_yr_df_qmapRM)
+
+
+POLCOM_ERSEM_ZooC_meanBiasRM = list(rcp45 = ZooC_rcp45_cpr_yr_df_meanBiasRM,
+                                rcp85 = ZooC_rcp85_cpr_yr_df_meanBiasRM)
+
+save(POLCOM_ERSEM_ZooC_qmap,file = "./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_ZooC_df_qmap.RData")
+save(POLCOM_ERSEM_ZooC_meanBiasRM,file = "./data/POLCOM_ERSEM_projections_biasRM/POLCOM_ERSEM_ZooC_df_meanBiasRM.RData")
+
+```
+
+
