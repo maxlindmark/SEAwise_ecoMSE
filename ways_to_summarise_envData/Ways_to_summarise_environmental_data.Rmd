@@ -35,7 +35,7 @@ We apply all analysis having an example stock in mind: North Sea cod, therefore 
 In order to execute the code in this tutorial you should have the following packages installed:
 
 - CRAN: [raster](https://cran.r-project.org/web/packages/raster/index.html), [terra](https://cran.r-project.org/web/packages/terra/index.html), [maptools](https://cran.r-project.org/web/packages/maptools/index.html), [maps](https://cran.r-project.org/web/packages/maps/), [rgeos](https://cran.r-project.org/web/packages/rgeos/), [sf](https://cran.r-project.org/web/packages/sf/index.html), [kohonen](https://cran.r-project.org/web/packages/kohonen/index.html), [corrplot](https://cran.r-project.org/web/packages/corrplot/index.html), [PCDimension](https://cran.r-project.org/web/packages/PCDimension/index.html), [devtools](https://cran.r-project.org/web/packages/devtools/index.html)
-- github: [marmalaid](https://github.com/BernhardKuehn/marmalaid), [fast.EOT](https://github.com/BernhardKuehn/fast.EOT)
+- github: [marmalaid](https://github.com/BernhardKuehn/marmalaid), [fast.EOT](https://github.com/BernhardKuehn/fast.EOT),
 [Rcpp2doParallel](https://github.com/coatless-rd-rcpp/rcpp-and-doparallel)
 
 ```{r Install packages,message=F,warning=F,eval=FALSE}
