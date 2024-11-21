@@ -31,6 +31,7 @@ vignettes/*.pdf
 # knitr and R markdown default cache directories
 *_cache/
 /cache/
+*_files/
 
 # Temporary files created by R markdown
 *.utf8.md
@@ -63,7 +64,3 @@ data/
 
 # do not sink html files
 *.html
-
-# don`t sink cache of bias-correction tutorial
-/bias_correction/Bias_correction_tutorial_cache/
-/bias_correction/Bias_correction_tutorial_files/
