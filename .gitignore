@@ -31,6 +31,7 @@ vignettes/*.pdf
 # knitr and R markdown default cache directories
 *_cache/
 /cache/
+*_files/
 
 # Temporary files created by R markdown
 *.utf8.md
@@ -58,3 +59,8 @@ rsconnect/
 # don't sync modelSelection.Rmd code
 /modelSelection/modelSelection.R
 
+# do not sinc data folder
+data/
+
+# do not sink html files
+*.html
