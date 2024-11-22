@@ -76,9 +76,10 @@ First we define some environmental covariates using an autoregressive integrated
 set.seed(1235)
 n <- 70
 ncov <- 12
-AR <- runif(ncov, min = 0, max = 0.9) # auto-regression coefficients
-
 envvars <- paste0("x", formatC(x = seq(ncov), digits = 1, flag = 0))
+AR <- runif(ncov, min = 0, max = 0.9) # auto-regression coefficients
+names(AR) <- envvars
+
 tmp <- lapply(seq(ncov), FUN = function(i){
   # Generate the time series
   ts_data <- arima.sim(model = list(ar = AR[i]), n = n)
@@ -95,9 +96,14 @@ dat$x02 <- dat$x02 + diff(range(dat$x02))*0.01*(dat$t-mean(dat$t)) # 1% of sd pe
 
 # plot time series
 df <- tidyr::pivot_longer(dat, cols = seq(ncol(dat))[-1])
+trend <- seq(envvars)*0
+trend[1:2] <- 1
+labs <- paste0(envvars, " (ar = ", as.character(round(AR, 2)), 
+  ifelse(trend, " + trend", ""), ")")
+names(labs) <- envvars
 ggplot(df) + aes(x = t, y = value, fill = name, color = name) + 
   geom_area(show.legend = F) + 
-  facet_wrap(~ name, ncol = 2, scales = "free_y") + 
+  facet_wrap(~ name, ncol = 2, scales = "free_y", labeller = labeller(name = labs)) + 
   theme_bw()
 ```
 
@@ -417,13 +423,12 @@ y <- 10 + 2*x + err
 df <- data.frame(x, y)
 fitlm <- lm(y ~ x, df)
 
-res <- data.frame(k = c(round(exp(seq(log(2),log(n/2), len = 10))),n), rmse = NaN, se = NaN)
+res <- data.frame(k = c(round(exp(seq(log(2),log(n/2), len = 10))),n), rmse = NaN, lwr = NaN, upr = NaN)
 for(i in seq(nrow(res))){
   tmp <- cvFun(model = fitlm, nperm = 50, k = res$k[i], seed = 1)
   res$rmse[i] <- rmse(y = tmp$y, yhat = tmp$yhat) # sd of residuals
   byPerm <- tmp %>% group_by(perm) %>% summarise(rmse = rmse(y = y, yhat = yhat))
-  res$se[i] <- sd(byPerm$rmse)/sqrt(nrow(byPerm))
-  if(res$k[i]==n){ res$se[i] <- 0}
+  res[i,c("lwr", "upr")] <- quantile(byPerm$rmse, probs = c(0.05, 0.95))
 }
 
 p1 <- ggplot(df) + aes(x = x, y = y) + 
@@ -433,8 +438,8 @@ p1 <- ggplot(df) + aes(x = x, y = y) +
 p2 <- ggplot(res) + aes(x = k, y = rmse) + 
   geom_line() + 
   geom_point() + 
-  geom_segment(mapping = aes(yend = rmse - se)) +
-  geom_segment(mapping = aes(yend = rmse + se)) +
+  geom_segment(mapping = aes(yend = lwr)) +
+  geom_segment(mapping = aes(yend = upr)) +
   geom_hline(yintercept = sqrt(mean(fitlm$residuals^2)), linetype = 2, col = 2) +
   geom_hline(yintercept = sqrt(mean(err^2)), linetype = 2, col = 4) + 
   geom_text(x = n/2, y = sqrt(mean(fitlm$residuals^2)), 
@@ -525,13 +530,13 @@ fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5,
   
   fitness <- -1 * mape(y = res$y, yhat = res$yhat) # to maximize, so reverse sign 
   if(!fitnessOnly){
-    byGroup <- res %>% group_by(perm) %>% summarise(mape = mape(y = y, yhat = yhat))
-    se <- sd(byGroup$mape)/sqrt(nrow(byGroup))
+    byGroup <- res %>% group_by(perm) %>% summarise(mape = -1*mape(y = y, yhat = yhat))
+    qs <- quantile(byGroup$mape, probs = c(0.05, 0.95))
   }
   if(fitnessOnly){
     out <- fitness
   }else{
-    out <- list(fitness = fitness, byGroup = byGroup, se = se)
+    out <- list(fitness = fitness, byGroup = byGroup, lwr = qs[1], upr = qs[2])
   }
   return(out)
 }
@@ -644,60 +649,55 @@ plot(ga.fit) # plot fitness development
 
 Rules of thumb (Tibshirani)
 
-```{r paretoPlot}
+```{r paretoFront}
 .pop$nVar <- rowSums(.pop[,seq(envvars)])
 .pop$fracVar <- .pop$nVar / length(envvars)
 names(.pop)[seq(envvars)] <- envvars
 
 # pareto front
 agg <- aggregate(fitness ~ fracVar, data = .pop, FUN = max)
-
-# determine standard error of pareto front models
 parFront <- merge(x = agg, y = .pop, all.x = T)
 parFront <- unique(parFront[,c(envvars, "nVar", "fracVar", "fitness")])
 parFront <- parFront[order(parFront$nVar),]
-parFront
 
-parFront$se <- NaN
+# determine distribution of fitness values on pareto front (by permutation)
+parFront$lwr <- parFront$upr <- NaN
 for(i in seq(nrow(parFront))){
   genes.i <- parFront[i,envvars]
-  tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = F)
-  parFront$se[i] <- tmp$se
+  tmp <- fitnessFun(genes = genes.i, data = dat, fitnessOnly = F)
+  parFront$lwr[i] <- tmp$lwr
+  parFront$upr[i] <- tmp$upr
 }
 
-
-upr <- parFront$fitness + parFront$se
-lwr <- parFront$fitness - parFront$se
-mid <- parFront$fitness
 # check if model fitness is greater than the upper bound of the simpler model
-better <- mid > c(-Inf, upr[-length(lwr)]) 
+better <- parFront$fitness > c(-Inf, parFront$upr[-nrow(parFront)]) 
 parFront$best <- FALSE
 hit <- max(which(better))
 parFront$best[hit] <- TRUE
 
+# get formula of best model
+best <- subset(parFront, best)[envvars]
+best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
+
+# return
+parFront
+```
+
+```{r paretoFrontPlot}
 ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) + 
   geom_point(size = 3) + 
-  # scale_color_viridis_c(name = "Iteration", option = "magma", direction = -1) +
+  geom_point(data = parFront, pch = 1, size = 3, color = 4, stroke = 1) + 
   scale_color_continuous(name = "Iteration", type = "viridis", direction = -1) +
   geom_path(data = parFront[better,], color = 4, linetype = 2) +
   geom_label(data = parFront[1,], color = 1, label = "Ricker", 
     hjust = 0.5, vjust = -0.5) +
-  geom_segment(data = parFront, aes(x = -fitness-se, xend = -fitness+se, y = fracVar, yend = fracVar), 
+  geom_segment(data = parFront, aes(x = -lwr, xend = -upr, y = fracVar, yend = fracVar), 
     color = 4, linewidth = 1) +
   geom_text(data = subset(parFront, best), color = "red", label = "*", size = 10, vjust = 0.25) +
   labs(x = "MAPE", y = "Fraction of environmental covariates", title = "Pareto front") + 
   theme_bw()
-
 ```
 
-```{r paretoFront}
-parFront
-```
-
-```{r bestModel, include=FALSE}
-best <- subset(parFront, best)[envvars]
-best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
-```
 
 **Results:**
 
@@ -705,6 +705,9 @@ best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
 -   We evaluated a population of `r popSize` individuals for `r max(.pop$iter)` generations, totaling `r nrow(.pop)` fitness evaluations.
 -   Memoisation evaluated `r nrow(unique(.pop[,seq(envvars)]))` unique models, saving us `r paste0(round((1-(nrow(unique(.pop[,seq(envvars)]))/nrow(.pop)))*100), "%")` of fitness evaluations.
 -   Only `r nrow(unique(.pop[,seq(envvars)]))` model configurations out of a total possible `r 2^length(envvars)-1` were evaluated (`r paste0(round(nrow(unique(.pop[,seq(envvars)]))/(2^length(envvars)-1)*100), "%")`).
+
+
+# Other cross validation considerations
 
 ## Flavor 2: Temporal blocking
 
@@ -844,15 +847,23 @@ tmp
 
 
 
-## Flavor 3: Hindcast preformance
+## Flavor 3: Hindcasting
 
-When future prediction is the focus, you may want to select the validation data more carefully to prevent the model from "*seeing*" the future, which could potentially bias results. One strategy is to again fit the model to the *training* data set, but have two holdout sets of future data: 1. the *validation* set, used for model selection, and 2. the *testing* set for evaluating prediction performance.
+When future prediction performance is the focus, you may want to select the validation data more carefully to prevent the model from "*seeing*" the future, which could potentially bias results. One strategy is to again fit the model to the *training* data set, but have two holdout sets of future data: 1. the *validation* set, used for model selection, and 2. the *testing* set for evaluating prediction performance after model selection. 
+
+In addition to addressing effects of autocorrelation, the set-up may also test for prediction performance when the time series is non-stationary, or subject to drift. 
+
+The amount of data used as holdouts (both for the validation and testing sets) will depend on the desired prediction performance. As with k-fold cross validation, a good rule of thumb would be to hold out 10--20\% of the model selection data. This will hopefully deal with issues of overfitting, while also looking at future prediction performance in the validation set. 
+
+Another consideration is the  forecast horizon of interest, which is a main consideration of the test data set size. Thus, the length of both holdout sets should not differ too much, otherwise you may choose a model based on prediction at one time scale, while evaluating prediction performance at another. 
+
+Finally, the prediction performance on the test set is often compared to a *naive* prediction (e.g. mean of recent values). The *MASE* metric compares the ratio of mean absolute error of the selected model to that of the naive model ($MAE_{mod}/MAE_{naive}$), with a score < 1.0 being a superior forecast model.
 
 
 ```{r testHoldout, echo=FALSE, fig.height=2}
 n <- nrow(dat) # length of time series
 nTest <- 5 # number of test holdout values
-nValid <- 15 # number of test holdout values
+nValid <- 7 # number of test holdout values
 nTrain <- n - nValid - nTest # number of training values
 df <- dat
 df$split <- c(rep("Training", nTrain), rep("Validation", nValid), rep("Testing", nTest))
@@ -867,38 +878,13 @@ ggplot(df) + aes(x = t, y = 0, col = split) +
   theme_bw()
 ```
 
-This can also be done in a rolling prediction manner, where the length of the training, validation, and testing sets are defined, and the starting data point can vary through time, within the limits allowed by these set lengths.
-
-```{r rollingTestHoldout, echo=FALSE, fig.height=2}
-n <- nrow(dat) # length of time series
-nTest <- 5 # number of test holdout values
-nValid <- 10 # number of test holdout values
-nTrain <- 45 # number of training values
-res <- vector("list", n)
-for(i in seq(n)){
-  startIdx <- i
-  if((startIdx + nTrain + nValid + nTest - 1) < n){
-    trainIdx <- seq(startIdx, len = nTrain)
-    validIdx <- seq(startIdx + nTrain, len = nValid)
-    testIdx <- seq(startIdx + nTrain + nValid, len = nTest)
-    
-    res[[i]] <- data.frame(split = c(rep("Training", nTrain), rep("Validation", nValid), rep("Testing", nTest)),
-      t = c(trainIdx, validIdx, testIdx), 
-      fold = i)
-  }
-}
-df <- do.call("rbind", res)
-df$split <- factor(df$split, levels = c("Training", "Validation", "Testing"))
-
-ggplot(df) + aes(x = t, y = fold, col = split) + 
-  geom_point() +
-  scale_color_brewer(name = "Split", palette = "Set2") +
-  scale_y_reverse() + 
-  theme_bw()
-```
 
 
-Finally, it may be useful to compare the prediction performance to some *naive* prediction, such as a men of recent values. The *MASE* metric is of particular use for this kind of forecast comparison.
+
+
+#### Example of hindcast with synthetic data
+
+
 
 In our example, since no strong autocorrelation was detected, lets try a k-fold approach for the model selection, leaving out the final 5 years of the data for MASE evaluation versus a naive model.
 
@@ -932,8 +918,6 @@ ggplot(df) + aes(x = t, y = fold, color = split) +
   scale_y_reverse() + 
   theme_bw()
 ```
-
-
 
 
 ```{r hindcast}
@@ -972,85 +956,95 @@ names(.pop)[seq(envvars)] <- envvars
 
 # pareto front
 agg <- aggregate(fitness ~ fracVar, data = .pop, FUN = max)
-
-# determine standard error of pareto front models
 parFront <- merge(x = agg, y = .pop, all.x = T)
 parFront <- unique(parFront[,c(envvars, "nVar", "fracVar", "fitness")])
 parFront <- parFront[order(parFront$nVar),]
-parFront
 
-parFront$se <- NaN
+# determine distribution of fitness values on pareto front (by permutation)
+parFront$lwr <- parFront$upr <- NaN
 for(i in seq(nrow(parFront))){
   genes.i <- parFront[i,envvars]
-  tmp <- fitnessFun(genes = genes.i, data = dat, nperm = 10, k = 5, ffSeed = 1, fitnessOnly = F)
-  parFront$se[i] <- tmp$se
+  tmp <- fitnessFun(genes = genes.i, data = datTrainValid, fitnessOnly = F) # Only re-fit to training/validation
+  parFront$lwr[i] <- tmp$lwr
+  parFront$upr[i] <- tmp$upr
 }
 
-
-upr <- parFront$fitness + parFront$se
-lwr <- parFront$fitness - parFront$se
-mid <- parFront$fitness
 # check if model fitness is greater than the upper bound of the simpler model
-better <- mid > c(-Inf, upr[-length(lwr)]) 
+better <- parFront$fitness > c(-Inf, parFront$upr[-nrow(parFront)]) 
 parFront$best <- FALSE
 hit <- max(which(better))
 parFront$best[hit] <- TRUE
+
+# get formula of best model
 best <- subset(parFront, best)[envvars]
 best <- paste(c(fixed_variables, names(best)[best == 1]), collapse = " + ")
+
+ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) + 
+  geom_point(size = 3) + 
+  geom_point(data = parFront, pch = 1, size = 3, color = 4, stroke = 1) + 
+  scale_color_continuous(name = "Iteration", type = "viridis", direction = -1) +
+  geom_path(data = parFront[better,], color = 4, linetype = 2) +
+  geom_label(data = parFront[1,], color = 1, label = "Ricker", 
+    hjust = 0.5, vjust = -0.5) +
+  geom_segment(data = parFront, aes(x = -lwr, xend = -upr, y = fracVar, yend = fracVar), 
+    color = 4, linewidth = 1) +
+  geom_text(data = subset(parFront, best), color = "red", label = "*", size = 10, vjust = 0.25) +
+  labs(x = "MAPE", y = "Fraction of environmental covariates", title = "Pareto front") + 
+  theme_bw()
+
 ```
 
 
 The best model is `r best`, which we will then fit again to the full training/validation data, and predict the testing holdout. The naive model prediction will be the geometric mean of recruitment from the last 10 years.
 
-```{r naiveCompare}
-# refit best model
-fmla <- best
-fitBest <- update(fit, data = datTrainValid, 
-  formula = as.formula(fmla, env = environment()))
-yhat <- predict(fitBest, newdata = datTest, type = "response")
+__Compare prediction of test set to naive model__
 
-# compare to geometric mean
-yhat_naive_gm <- rep(exp(mean(log(tail(datTrainValid$rec, 10)))), nrow(datTest))
-MASE_gm <- mase(y = datTest$rec, yhat = yhat, yhat_naive = yhat_naive_gm)
+Selected model is refit to the entire training/validation data set, and prediction is made to the test set. Here the prediction performance is presented relative to that of a naive model (MASE) to evaluate potential gains.
+
+```{r naiveCompare}
+# naive prediction (geometric mean of last 10 years)
+yhat_naive <- rep(exp(mean(log(tail(datTrainValid$rec, 10)))), nrow(datTest))
+
+# prediction best model
+fmla <- best
+fitBest <- update(fit, data = datTrainValid, # re-fit to train/valid data
+  formula = as.formula(fmla, env = environment()))
+yhat_mod <- predict(fitBest, newdata = datTest, type = "response")
+MASE_mod <- mase(y = datTest$rec, yhat = yhat_mod, yhat_naive = yhat_naive)
 
 # compare to non-env Ricker
 fmla <- "rec ~ ssb + offset(log(ssb))"
-fitRicker <- update(fit, data = datTrainValid, 
+fitRicker <- update(fit, data = datTrainValid, # re-fit to train/valid data
   formula = as.formula(fmla, env = environment()))
-yhat_naive_ri <- predict(fitRicker, newdata = datTest, type = "response")
-MASE_ri <- mase(y = datTest$rec, yhat = yhat, yhat_naive = yhat_naive_ri)
-```
+yhat_ri <- predict(fitRicker, newdata = datTest, type = "response")
+MASE_ri <- mase(y = datTest$rec, yhat = yhat_ri, yhat_naive = yhat_naive)
 
-
-
-
-```{r naiveCompare2, echo=FALSE, fig.height=4}
 df1 <- dat[,c("t", "rec")]
 df1$type = ifelse(df1$t %in% datTrainValid$t, "train/valid", "test")
 df2 <- datTest[,c("t", "rec")]
-df2$rec <- yhat
-df2$type = "model"
+df2$rec <- yhat_mod
+df2$type = "Ricker w/ env."
 df3 <- datTest[,c("t", "rec")]
-df3$rec <- yhat_naive_gm
-df3$type = "Geom. mean (naive)"
+df3$rec <- yhat_naive
+df3$type = "Naive"
 df4 <- datTest[,c("t", "rec")]
-df4$rec <- yhat_naive_ri
-df4$type = "Ricker (naive)"
+df4$rec <- yhat_ri
+df4$type = "Ricker"
 
 df <- rbind(df1, df2, df3, df4)
-df$type <- factor(df$type, levels = c("train/valid", "test", "model", "Ricker (naive)", "Geom. mean (naive)"))
+df$type <- factor(df$type, levels = c("train/valid", "test", "Ricker w/ env.", "Ricker", "Naive"))
 
 ggplot(df) + aes(x = t, y = rec, colour = type) + 
   geom_point() + 
   geom_line() +
   annotate("text", x = min(df$t), y = max(df$rec), 
-    label = paste("MASE (Ricker) =", round(MASE_ri, 3)), 
-    hjust = 0, color = "orange3") + 
+    label = paste("MASE (Ricker w/ env.) =", round(MASE_mod, 3)), 
+    hjust = 0, color = "blue") + 
   annotate("text", x = min(df$t), y = max(df$rec), 
-    label = paste("MASE (Geom. mean) =", round(MASE_gm, 3)), 
+    label = paste("MASE (Ricker) =", round(MASE_ri, 3)), 
     hjust = 0, vjust = 2, color = "green4") + 
   scale_color_manual(name = "Data type", 
-    values = c("grey30", "grey", "blue", "orange3", "green4")) +
+    values = c("grey30", "grey", "blue", "green4", "orange")) +
   theme_bw()
 
 ```
@@ -1058,6 +1052,110 @@ ggplot(df) + aes(x = t, y = rec, colour = type) +
 So, the prediction performance is slightly better than the naive prediction (MASE < 1.0), but this might not be strong enough to use in practice. Note that the model was given future SSB and the environmental covariates
 
 Short- vs long-term performance (MSE scenario vs STF)
+
+### Another hindcast test - peels
+
+A strategy that is slowly being adopted in the selection of stock assessment models, is to see how robust they are to prediction 
+
+
+
+```{r hincastPeels, fig.width=7}
+nPeel <- 5
+maxForecast <- 1
+res <- vector("list", nPeel+1)
+for(i in c(0,seq(nPeel))){
+  
+  # remove i years
+  datTrain.i <- subset(dat, subset = t <= (max(t) - i))
+  datTest.i <- subset(dat, subset = t > (max(t) - i))
+
+  # refit model to data
+  fmla <- best
+  fit.i <- update(fit, data = datTrain.i,
+    formula = as.formula(fmla, env = environment()))
+  
+  # predictions
+  datTrain.i$type <- "Train"
+  datTrain.i$forecast <- NaN
+  datTrain.i$forecast[length(datTrain.i$forecast)] <- 0
+  
+  if(i>0){
+  datTest.i$type <- "Test"
+  datTest.i$forecast <- seq(nrow(datTest.i))
+  }
+  
+  datPred <- rbind(datTrain.i, datTest.i)
+  datPred$peel <- i
+  datPred$yhat_mod <- predict(fit.i, newdata = datPred, type = "response")
+  datPred$yhat_naive <- rep(exp(mean(log(tail(datTrain.i$rec, 10)))), nrow(datPred))
+  
+  # record
+  res[[i+1]] <- datPred[,c("t", "type", "peel", "forecast", "rec", "yhat_mod", "yhat_naive")]
+}
+res <- do.call("rbind", res)
+res$peel <- factor(res$peel)
+
+dfTrain <- subset(res, type == "Train")
+dfTest <- subset(res, type == "Test")
+dfForecast <- subset(res, forecast <= maxForecast)
+dfForecast2 <- subset(dfForecast, forecast>0)
+
+# calculate MASE
+MASE_mod <- with(dfForecast2, mase(y = rec, yhat = yhat_mod, yhat_naive = yhat_naive))
+
+# calculate Mohn's rho
+L <- split(unique(res$peel), unique(res$peel))
+tmp <- lapply(L, FUN = function(x){
+  subset(res, peel == x & t > (max(t)-nPeel-1) & forecast %in% c(NaN, 0))[,c("t", "peel", "yhat_mod")]
+})
+tmp <- do.call("rbind", tmp)
+tmp2 <- tmp |> pivot_wider(
+  names_from = peel, 
+  values_from = yhat_mod,
+  names_prefix = "peel_"
+)
+tmp3 <- as.data.frame(tmp2[,-1])
+rownames(tmp3) <- tmp2$t
+RHO_mod <- icesAdvice::mohn(tmp3)
+
+
+p1 <- ggplot(data = dfTrain) + aes(x = t, y = yhat_mod, color = peel, group = peel) + 
+  geom_point(data = res, mapping = aes(y = rec), color = "grey") + 
+  geom_line() + 
+  geom_line(data = dfForecast, linetype = 2) + 
+  geom_point(data = dfForecast2, show.legend = F) + 
+  labs(x = NULL, y = "recruitment", color = "Title") +
+  annotate("text", x = min(res$t), y = max(res$rec), 
+    label = paste("Mohn's Rho =", round(RHO_mod, 3)), 
+    hjust = 0, color = "black") + 
+  theme_bw()
+
+p2 <- ggplot(data = dfTrain) + aes(x = t, y = yhat_mod, color = peel, group = peel) + 
+  geom_point(data = res, mapping = aes(y = rec), color = "grey") + 
+  geom_line() + 
+  geom_line(data = dfForecast, linetype = 2) + 
+  geom_point(data = dfForecast2, show.legend = F) + 
+  labs(x = NULL, y = "recruitment") +
+  coord_cartesian(xlim = range(dfForecast$t)+c(-2, 0), 
+    ylim = range(subset(res, t >= min(dfForecast$t)-2)[,c("rec", "yhat_mod")])) +
+  annotate("text", x = min(dfForecast$t)-2, y = max(dfForecast$rec), 
+    label = paste("MASE =", round(MASE_mod, 3)), 
+    hjust = 0, color = "black") + 
+  theme_bw()
+
+layout = "
+AAABB
+AAABB
+"
+
+p <- (p1 | p2) + plot_layout(design = layout, axes = "collect", guides = "collect") &
+  theme_bw()
+print(p)
+
+```
+
+
+
 
 
 # Further considerations

@@ -6,11 +6,14 @@ bibliography: Ways_to_summarise_environmental_data.bib
 biblio-style: "apalike"
 link-citations: true
 output:
-  html_document:
+  cleanrmd::html_document_clean:
     toc: true
-    theme: united 
+    mathjax: default
+    use_fontawesome: true
+    theme: water
+    highlight: "pygments"
     df_print: paged
-
+    self_contained: true
 ---
 
 ```{r setup, include=FALSE}

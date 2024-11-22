@@ -1,0 +1,1206 @@
+---
+title: "Look at env. effects on reference points"
+author: "Bernhard Kühn & Marc Taylor - Thünen SF"
+date: "`r Sys.Date()`"
+output:
+  cleanrmd::html_document_clean:
+    toc: true
+    fig.witdh: 12
+    mathjax: default
+    use_fontawesome: true
+    theme: water
+    highlight: "pygments"
+    df_print: paged
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,size = "small")
+```
+
+## Introduction
+
+Now that we have modeled environmental influences on recruitment and growth of a stock, we want to see how this might affect reference points in the future. Normally ICES does a
+benchmark approximately every 5 years to adapt the management to changes in the perception of the stock (e.g. changes in the productivity regime of the stock). With an explicit environmental influence resulting in a declining trend in productivity, reference points would likely change as well. This was not considered in our previous simulations, where we only simulated the stock forward with the current management routine in place. To get an idea how reference points might be affected we now set up a simulation, where we simulate harvesting under different target F combined with future periods of decreasing productivity. So we get a glimpse on how Fmsy and Btrigger might change in the 2030s, 2040s, 2050s under the respective climate change scenarios RCP4.5 and RCP8.5.
+
+**The goals of this tutorial:**
+
+- the use of MSEs for reference point estimation
+- see how reference points might be affected by climate change (RCP4.5 & RCP8.5)
+
+## Required packages to run this tutorial
+
+In order to execute the code in this tutorial you should have the following packages
+installed:
+
+-   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/),
+    [earth](https://cran.r-project.org/web/packages/earth),
+    [plyr](https://cran.r-project.org/web/packages/plyr),
+    [stringr](https://cran.r-project.org/web/packages/stringr/),
+    [reshape2](https://cran.r-project.org/web/packages/reshape2/),
+    [ggplot2](https://cran.r-project.org/web/packages/ggplot2/),
+    [patchwork](https://cran.r-project.org/web/packages/patchwork/)
+-   FLR: [FLCore](https://flr-project.org/FLCore/),
+    [FLFleet](https://flr-project.org/FLFleet/), [FLash](https://flr-project.org/FLash/),
+    [FLAssess](https://flr-project.org/FLAssess/),
+    [FLBEIA](https://flr-project.org/FLBEIA/)
+
+```{r Install packages,eval=FALSE}
+install.packages( c("FLCore", "FLFleet", "FLBEIA",
+                    "FLash", "FLAssess"), 
+                  repos="http://flr-project.org/R")
+install.packages( c("plyr","stringr","reshape2","glmmTMB",
+                    "ggplot2","patchwork"))
+
+```
+
+Load all the necessary packages:
+
+```{r Load packages, message=F,warning=F,error=F}
+library(FLBEIA)
+library(FLCore)
+library(parallel)
+library(glmmTMB)
+library(earth)
+library(plyr)
+library(stringr)
+library(reshape2)
+library(earth)
+library(ggplot2)
+library(patchwork)
+```
+
+## Load/Create helper functions & lookup tables
+
+```{r Load functions, message=F,error=F,warning=F}
+# required functions ------------------------------------------------------
+source("../functions/nameChange.R")
+
+# load EMSRR models -------------------------------------------------------
+emsrr.names =sapply(list.files("../data/EMSRRs/","*.RData|*.Rdata",
+                               full.names = T),
+       load,envir = .GlobalEnv)
+stk_nms = as.vector(gsub(".EMSRR.*","",emsrr.names)) 
+emsrr_lut = data.frame(stk_long = stk_nms,
+                       stk_flbeia = ifelse(stk_nms == "Cod",
+                                           "COD-NS",NA),
+                       model.obj = emsrr.names)
+
+# load parameter uncertainty of EMSRRs ------------------------------------
+load("../data/EMSRR.models_boot.Rdata")
+emsrr_stks = names(EMSRRs_boot)
+
+# load look-up table ------------------------------------------------------
+
+load(file = "../data/eqsim_lut.Rdata")
+load(file = "../data/lw_lut.Rdata")
+```
+
+## Define Global Setup
+
+Here we just define the overall setup for the MSE: what Ftarget\`s to run, what biological
+parameters to vary or include, the periods for which we want to evaluate the ref-pt
+changes as well as the number of iterations. The aim is to run longterm simulations under
+varying F + a constant environmental forcing corresponding to the average of the chosen
+period (e.g. 2030s) until reaching equilibrium (\~2099) and take the equilibrium yield and
+SSB as a basis to see reference point changes.
+
+```{r Global Setup, message = F, error=F,warning=F}
+# global settings ------------------------------------------------------
+
+stochastic_sr <- TRUE
+stochastic_bio <- TRUE
+stochastic_sel <- TRUE
+
+# start of loop through stocks ---------
+
+# define periods with a constant environment
+periods = c(2030,2040,2050)
+
+# use cod as an example
+stk_name = "COD-NS"
+stk_long = emsrr_lut$stk_long[emsrr_lut$stk_flbeia == stk_name]
+
+# specify scenarios 
+
+# dd = density dependence
+# update.m = update natural mortality with m ~ stock.w relationship
+# update.q = update catchability with q ~ stock.w relationship
+# det = deterministic (i.e. no uncertainty on recruitment)
+# Ftarg = target fishing mortality (constant through time; i.e. no hcr)
+# iter = iteration number
+
+Ftarg = seq(0.1,0.7,0.1) # relatively coarse grid, for demonstration purposes
+# only run without HCR
+scen <- expand.grid(
+  dd = c(F),
+  update.m = c(T, F),
+  update.q = c(T, F),
+  Ftarg = Ftarg,
+  det = c(F),
+  hcr = F,
+  growth = T,
+  emsrr = T,
+  clim.scen = c("noCC", "rcp45", "rcp85"),
+  period = c("None", periods),
+  iter = 1:100
+) 
+
+# exclude some scenarios
+excl1 <- with(scen, which(dd == F & (update.m == T | update.q == T))) 
+# when dd = F, no need to update m and q
+excl2 <- with(scen, which(det == T & iter > 1)) 
+# when deterministic forecast, only one iteration is needed
+excl3 <- which((scen$clim.scen != "noCC" & scen$period == "None")| 
+                 (scen$clim.scen == "noCC" & scen$period != "None")) 
+# only noCC as "None"
+excl <- unique(c(excl1, excl2, excl3))
+scen <- scen[-excl,]
+rownames(scen) <- seq(nrow(scen))
+
+head(scen)
+unique(scen[,c("clim.scen","period")])
+
+scen$name <- paste0("Ftarg_", scen$Ftarg, "~", 
+  "dd_", scen$dd, "~", 
+  "m_", scen$update.m, "~", 
+  "q_", scen$update.q, "~",
+  "det_", scen$det, "~",
+  "growth",scen$growth,"~",
+  "emsrr",scen$emsrr,"~",
+  "clim_",scen$clim.scen,"~",
+  "period",scen$period,"~",
+  "iter", scen$iter
+)
+
+niter <- length(scen$Ftarg) # number of forecasts
+```
+
+## Load pre-Conditioned Input data
+
+Since we do not want to go all the way through the conditioning of the modell we just load
+the pre-conditioned MSE input and modify it accordingly to match our simulations.
+
+```{r Load input data, message=F,warning=F,error=F}
+
+
+load(file = file.path("../data/input_objects", paste0(
+  paste(stk_name, "emsrr_growth", sep = "_"), ".Rdata"
+)))
+
+RANGE <- range(stock)
+yr.now <- RANGE["maxyear"] + 1
+yr.TACp1 <- yr.now + 1
+
+# make sure catch threshold can't completely deplete stock
+fleets.ctrl$catch.threshold[] <- 0.95
+
+# if stock is COD-NS, then remove emmigration component of M
+# "Does not include increased M values to introduce emmigration. To recover original M values add log(1-0.15) to ages >= 3 in years >= 2011"
+if(stk_name == "COD-NS"){
+  biols[[nameChange(stk_name,"new")]]@m[ac(3:RANGE["max"]), ac(min(an(dimnames(biols[[nameChange(stk_name,"new")]]@m)$year)):RANGE["maxyear"])] <- 
+    biols[[nameChange(stk_name,"new")]]@m[ac(3:RANGE["max"]), ac(min(an(dimnames(biols[[nameChange(stk_name,"new")]]@m)$year)):RANGE["maxyear"])] + log(1-0.15)
+}
+```
+
+## Growth Setup
+
+Here we load in the growth model, which is a **linear-mixed model** fitted with `glmmTMB`,
+including an influence of **bottom temperature** and **bottom salinity** on growth.
+
+First we need to bring it in the format to use it within FLBEIA, so give it a specific
+name we refer to later on, when calling the model. Also if not calculated yet, we
+extract/calculate the unexplained residual noise, that we later use to create uncertainty
+around the predicted growth.
+
+```{r Growth Setup,message = F,error=F,warning=F}
+# ----------------------------------------- #
+# prepare growth model input
+  
+# load growth prediction function & modified ASPG-model
+source("../functions/growthModel_functions.R")
+  
+# data.frame with FLBEIA stock name and official ICES one
+# only those stocks that had a significant covariate (env. or ssb)
+model.lut = data.frame(stock = "COD-NS",
+                       code = "cod.27.47d20",
+                       method = "glmmTMB_AICc")
+for(i in 1:nrow(model.lut)){
+    tmp = model.lut[i,]
+    # get models
+    mod = paste(tmp$code,tmp$method,sep = "_")
+    name_mod = load(list.files("../data/growth_models/",mod,full.names = T))
+  if(length(name_mod)>1){
+      # check if gFit is in the model.obj
+      name_mod1 = name_mod[name_mod %in% "gFit"]
+      mod.obj = get(name_mod1)
+      # add other scaling parameters to the model object as vector
+      name_scaling = name_mod[!(name_mod %in% "gFit")]
+      scaling_pars = sapply(name_scaling,get)
+      # in the attributes of the model
+      attributes(mod.obj)$scaling = scaling_pars
+    } else{
+      mod.obj = get(name_mod)
+    }
+    # add residual noise to the model-object
+      resids = residuals(mod.obj)
+      if(length(resids) == 0){
+        pred = glmmTMB:::predict.glmmTMB(mod.obj)
+        obs = mod.obj$frame$logw2
+        resids = obs - pred
+      } 
+      df_residuals = data.frame(age = mod.obj$frame$age,log_resids = resids)
+      df_age_residuals = plyr::ddply(df_residuals,"age",plyr::summarise,
+                                     sd_residuals = sd(log_resids))
+      # add plusqroup noise as noise over all
+      sd_plusgroup = data.frame(age = max(df_age_residuals$age)+1,
+                                sd_residuals = sd(df_residuals$log_resids))
+      df_age_residuals = rbind(df_age_residuals,sd_plusgroup)
+      
+      mod.obj$residual_noise = df_age_residuals
+    # assign new name
+    model.lut$growth.model_stk[i] = mod
+    assign(mod,mod.obj)  
+  }
+  # rename columns
+  names(model.lut)[names(model.lut) == "method"] <- "growth.model"
+  # rename stock names
+  model.lut$stock = nameChange(model.lut$stock,"new")
+  
+  model.table = model.lut
+  
+```
+
+The growth model gets called in a modified function `ASPG.growth` to simulate the
+age-based dynamics (the base-FLBEIA function is "ASPG" - Age-based-population-growth). In
+order for FLBEIA to know, which growth model and parameters to use we define the model
+lookup-table `model.table` as function argument to `ASPG.growth`. We also do it with the
+lookup-table for natural mortality `stk_m`, as **natural mortality gets modifed if fish
+grow** (e.g. lighter/smaller fish are more prone to predation compared to a more heavier
+fish). **Changes in catchability due to growth** need to be defined in the fleets OM,
+simulating the actual fleet behaviour. Therefore we defined a modified `SMFB`-function
+(Simple Mixed fisheries behaviour), `SMFB.growth`, where we now include the `fleets_q`
+lookup table (containing interpolated catchabilities per weight per year, and which get
+resampled during the simulation).
+
+```{r growth setup 2, message=F,error=F,warning=F}
+  # explicitly add the model lookup table to the function arguments of 
+  # the ASPG.growth function
+  formals(ASPG.growth)$model.table = model.table
+  # add function to update m
+  formals(update.m)$m_table = stks_m
+  # add element to smfb.growth function
+  formals(SMFB.growth)$fleets_q = fleets_q # the catchability curves
+```
+
+Now we prepare the growth covariates. As I mentioned earlier, we have bottom temperature
+and bottom salinity averaged over the ICES stock area influencing the growth of cod.
+
+We load an input object containing 100 time series per covariate for each RCP-scenario
+(RCP4.5 and RCP8.5). Those time series are bias-corrected and BVAR-generated (see previous
+tutorials) realisations of the POLCOMS-ERSEM regionally-downscaled climate projection for
+the North Atlantic.
+
+In order to have a "baseline" to compare to, we generate a 'noCC' or 'Current' climate
+scenario, where we remove the trend from the RCP4.5 scenario. Based on RCP-scenarios, we
+prepare also the environmental data corresponding to the mean of the periods 2030, 2040
+and 2050 that we use to inform the simulations in order to get reference point changes for
+those periods.
+
+```{r Prepare the growth Covars,message=F,warning=F,error=FALSE}
+
+  # prepare growth covar-objects #
+  # -------------------------------- #
+    load("../data/growth_covars/Stock_ICES.avg_projections.RData")
+
+  # restructure to have variables all under one projection 
+  # (temp & salt under rcp4.5)
+  stk_ices_avg_proj = list()
+  for(ii in seq_along(Stock_ICES.avg_projections)){
+    tmp = Stock_ICES.avg_projections[[ii]]
+    if(ii == 1){
+      stk_ices_avg_proj = tmp
+    } else {
+      for(jj in seq_along(tmp)){
+        stk_ices_avg_proj[[jj]] = merge(stk_ices_avg_proj[[jj]],tmp[[jj]],
+                                        by = "time")
+      }
+    }
+  }
+  
+  # create noCC runs by removing the long-term median 
+  # over all runs from each iteration
+  # based on rcp45
+  create.noCC = function(df){
+    # helper function
+    fast.noCC = function(time,dat){
+      med = apply(dat,1,median);
+      df = data.frame(time = time,dat - med + med[1]) # correction for the intercept
+      return(df)
+    }
+    # split df by stock | variable
+    nm = names(df)
+    vars = stringr::str_extract(pattern = "bottomT|SST|bottomSalt|surfaceSalt",
+                                string = nm)
+    vars = unique(na.omit(vars))
+    stks = stringr::str_extract(pattern = "COD",string = nm)
+    stks = unique(na.omit(stks))
+    n = 1
+    for(i in seq_along(vars)){
+      tmp1 = df[,grep(vars[i],nm)]
+      for(j in seq_along(stks)){
+        cat("Processing:","||",vars[i],"|",stks[j],"||","\n")
+        tmp2 = tmp1[,grep(stks[j],names(tmp1))]  
+        noCC.runs = fast.noCC(time = df$time,dat = tmp2)
+        if(n == 1){
+          noCC.runs_all = noCC.runs
+        } else{
+          noCC.runs_all = merge(noCC.runs_all,noCC.runs,by = "time") 
+        }
+        n = n+1
+      }
+    }
+    # rename
+    names(noCC.runs_all) <- gsub("rcp45|rcp85","noCC",names(noCC.runs_all))
+    return(noCC.runs_all)
+    
+  }
+  
+  # create noCC runs
+  stk_ices_avg_proj$noCC = create.noCC(df = stk_ices_avg_proj$rcp45)
+  
+  # extract per stock and variable
+  covars.df = lapply(stk_ices_avg_proj,function(x){
+    stk_lut = data.frame(stk.abbr = c("COD"),
+                         stkname = c("COD_dash_NS"))
+    x_melt = reshape2::melt(x,id.vars = "time")
+    x_melt$year = x_melt$time
+    x_melt$time <- NULL
+    # extract stock and variable
+    x_melt$var = stringr::str_extract(pattern = "bottomT|SST|bottomSalt|surfaceSalt",
+                                      string = x_melt$variable)
+    # rename var
+    x_melt$var = ifelse(x_melt$var == "bottomT","temp",
+                        ifelse(x_melt$var == "bottomSalt","sal",NA))
+    x_melt$stock = stringr::str_extract(pattern = "COD",
+                                        string = x_melt$variable)
+    # exchange with stock name used in FLBEIA
+    x_melt$stock = stk_lut$stkname[match(x_melt$stock,stk_lut$stk.abbr)] 
+    x_melt$iter = as.numeric(gsub(".*iter","",x_melt$variable))
+    # split by iteration
+    x_melt_split = split(x_melt,x_melt$iter)
+    return(x_melt_split)
+  })
+
+# replace the EMSRRs by the median signal corresponding to the specific period
+# calc.mean over respective periods
+    lst_means = list()
+    for(r in c("rcp45","rcp85")){
+      lst_means[[r]] = list()
+      #for(p in periods){
+        tmp_rcp = do.call(rbind,covars.df[[r]])
+        lst_means[[r]]= lapply(periods,function(p){
+          x = tmp_rcp
+          tot.period_mean = plyr::ddply(x[x$year >= p & x$year < p+10,],
+                                        c("var","stock"),plyr::summarise,
+                tot.period.mean = mean(value))
+          # remove trend
+          med = plyr::ddply(x,c("year","var","stock"),plyr::summarise,
+                            trend = median(value))
+          x.trend = merge(x,med)
+          x.trend = merge(x.trend,tot.period_mean)
+          x.trend$ts.period = x.trend$value - x.trend$trend + x.trend$tot.period.mean
+          # create new data.frame & replace value by the period time series
+          df = x.trend[,names(x)]
+          df$value = x.trend$ts.period
+          # split by iter
+          df.split = split(df,f = df$iter)
+          return(df.split)
+        })
+        names(lst_means[[r]]) = ac(periods)  
+        
+        # put into original environmental data list as "new" scenarios
+        covars.df[paste(r,periods,sep = "_")] <- lst_means[[r]][ac(periods)]
+      }
+# end of loading input relevant for stocks with explicit growth considered 
+
+# display 
+tmp = do.call(rbind,lapply(1:length(covars.df),function(x){
+  tmp = do.call(rbind,covars.df[[x]])
+  tmp$period = names(covars.df)[x]
+  return(tmp)
+  }))
+tmp$proj = gsub("_.*","",tmp$period)
+tmp$time = gsub(".*_","",tmp$period)
+
+# add median to table
+tmp = ddply(tmp,c("var","stock","period"),mutate,
+            median_period = median(value))
+# plot
+p1 = ggplot(tmp[grepl("COD",tmp$stock) & tmp$var == "temp" & 
+             tmp$period %in% c("noCC","rcp45","rcp85"),],
+            aes(x = year,y = value,
+                group = paste(iter,period),color = period)) +
+  geom_line() + 
+  scale_colour_manual(values = c("aquamarine3","orange","darkred")) +
+  geom_vline(xintercept = proj.yr,lty = 2) + 
+  ggtitle("Climate Projections for T [°C]")
+
+p2 = ggplot(tmp[grepl("COD",tmp$stock) & tmp$var == "temp" & 
+             !(tmp$period %in% c("noCC","rcp45","rcp85")),],
+            aes(x = year,y = value,
+                group = paste(iter,period),color = period)) +
+  geom_line() + 
+  geom_hline(aes(yintercept = median_period),lty = 2) + 
+  facet_grid(proj~time) + 
+  geom_vline(xintercept = proj.yr,lty = 2) + 
+  ggtitle("Climate averages")
+
+# plot together
+p = p1/p2 & theme_void()
+print(p)
+```
+
+To pass the growth covariates to FLBEIA we need to convert those to `FLquant` objects.
+Therefore I made a few helper-functions.
+
+The `prep_GrowthEnv_covars`-function converts the prepared covariate data.frames to
+`FLQuants`. Similarly, I got a function `prep_Growth.Uncertainty.by.age_covars` that
+handles the `FLQuant` generation of the growth-model noise component. Additionally, a last
+function `prep_catchability_covars` handles the coersion of resampled catchabilites to a
+`FLQuant` object.
+
+It is a bit of an overkill here and rather inflates the code, but trust me, if you got a
+bunch of stocks (which you definitely have in a mixed fisheries setting), it comes quite
+in handy...
+
+```{r Prepare functions to handle Growth covars,message=F,warning=F,error=F}
+# function to prepare covars object
+prep_GrowthEnv_covars = function(df, first.yr,last.yr){
+    # convert a data.frame to an flquants file
+    # 0. restrict to specific time
+    df = df[df$year >= first.yr & df$year <= last.yr,]
+    # 1. create list
+    tmp = split(df,f = df[,c("var","stock")])
+    # remove empty objects
+    indx.NULL = which(sapply(tmp,nrow) == 0)
+    if(length(indx.NULL) >= 1){
+      tmp[indx.NULL] <- NULL
+    }  
+    # if the first.yr lies before the extent of the covariate, just
+    # extent with NAs
+    if(min(df$year) > first.yr){
+      tmp = lapply(tmp,function(x){
+        extent.yrs = first.yr:(min(x$year)-1)
+        x = x[order(x$year),]
+        x_extent = x[1:length(extent.yrs),]
+        x_extent$year = extent.yrs
+        x_extent$value = NA
+        x = rbind(x_extent,x)
+        return(x)
+      })
+    }
+    
+    
+    covars = FLCore::FLQuants(lapply(tmp, function(x) {
+      FLCore::FLQuant(x$value, dimnames = list(year = x$year))
+    }))
+    return(covars)
+  }
+  
+  # function to create covars to add uncertainty to the weight-at-age-relationship
+  prep_Growth.Uncertainty.by.age_covars = function(df, first.yr,last.yr){
+    # convert a data.frame to an flquants file
+    # 0. restrict to specific time
+    df = df[df$year >= first.yr & df$year <= last.yr,]
+    # 1. create list
+    tmp = split(df,f = df[,c("var","stock")])
+    # remove empty objects
+    indx.NULL = which(sapply(tmp,nrow) == 0)
+    if(length(indx.NULL) >= 1){
+      tmp[indx.NULL] <- NULL
+    }  
+    # if the first.yr lies before the extent of the covariate, just
+    # extent with NAs
+    if(min(df$year) > first.yr){
+      tmp = lapply(tmp,function(x){
+        extent.yrs = first.yr:(min(x$year)-1)
+        x_extent = x[1:length(extent.yrs),]
+        x_extent$year = extent.yrs
+        x_extent$value = NA
+        
+        x = rbind(x_extent,x)
+        return(x)
+      })
+    }
+    
+    covars = FLCore::FLQuants(lapply(tmp, function(x) {
+      # sort x by age and year
+      x = x[order(x$age, x$year, decreasing = F), ]
+      # produce FLQuant
+      FLCore::FLQuant(
+        matrix(
+          x$value,
+          nrow = length(unique(x$age)),
+          ncol = length(unique(x$year)),
+          byrow = T
+        ),
+        dimnames = list(age = unique(x$age), year = unique(x$year))
+      )
+    }))
+    return(covars)
+  }
+  
+  # function to prepare covar for selectivity resampling
+  prep_catchability_covars = function(flt_mt_stk_list,years){
+    flat_list = marmalaid::flatten.list(flt_mt_stk_list)
+    names(flat_list) = paste("q",names(flat_list),sep = "_")
+    covars = FLCore::FLQuants(lapply(flat_list, function(x) {
+      FLCore::FLQuant(x, dimnames = list(year = years))
+    }))
+    return(covars)  
+  }
+  
+```
+
+## Uncertainty Setup
+
+Here we define the resampling schemes for different biological parameters.
+
+Add uncertainty in the EMSRR via resampling of the EMSRR-model + uncertainty in the
+environmental covariates.
+
+Additionally define the noise component of the growth model.
+
+```{r, message = F, error=F,warning=F}
+# define uncertainty, selectivity, and biological values for each  --------
+uiter <- unique(scen$iter)
+set.seed(987654 + which(names(eqsim_lut) == stk_name)) # otherwise each stock gets the same set of stochasticity
+
+# uncertainty in recruitment (bootstrapped model parameters/bootstrapped models)
+srr_pars = EMSRRs_boot[[stk_name]]$srr_pars_boot
+  
+# subset srr_pars
+indx_draws = sample(1:nrow(srr_pars),length(uiter),replace = F)
+srr_pars_sub <- srr_pars[indx_draws,]
+  
+# SR uncertainty
+flq <- SRs_rcp45[[nameChange(stk_name,"new")]]@uncertainty
+DIM <- dim(flq)
+DIMNAMES <- dimnames(flq)
+DIM[6] <- length(uiter)
+DIMNAMES[[6]] <- ac(uiter)
+SR_uncertainty <- FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+for(i in uiter){
+  SR_uncertainty[, proj.yrs,,,,i] <- rlnorm(n = length(proj.yrs),
+                                            meanlog = 0,
+                                            sdlog = srr_pars_sub$cv[i])
+}
+# store sampled bootstrapped models
+model_obj_sub = EMSRRs_boot[[stk_name]]$srr_fit_boot[indx_draws]
+ 
+# uncertainty in growth
+# add uncertainty/noise to the fitted growth relationship
+set.seed(42)
+# build a covariate df that can be used by the prep.GrowthEnv_covars function
+n = 1; wt_noise = list()
+for(m in 1:nrow(model.table)){
+    gr.mod = model.table$growth.model_stk[m]
+    stk = model.table$stock[m]
+    # get sd of the additional noise for the weight-at-age model
+    wt.uncertainty = get(gr.mod)$residual_noise
+    for(it in uiter){
+      for(a in wt.uncertainty$age){
+        sd_log = wt.uncertainty$sd_residuals[wt.uncertainty$age == a]
+        noise.out = rlnorm(length(first.yr:last.yr),meanlog = 0,sdlog = sd_log)
+        df.wt.noise = data.frame(age = a,iter = it,var = "wt.uncertainty",
+                                 year = first.yr:last.yr,
+                                 stock = stk,
+                                 value = noise.out)
+        wt_noise[[n]] = df.wt.noise
+        n = n+1
+      }
+    }
+  }
+  wt.noise.per.stk = do.call(rbind,wt_noise)
+# check if it works with the prep_GrowthEnv_covars function
+#prep_Growth.Uncertainty.by.age_covars(df = wt.noise.per.stk[wt.noise.per.stk$iter == 1,],first.yr,last.yr)
+# works!
+
+# catchability / selectivity resampling
+flq <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@catch.q
+DIM <- dim(flq)
+DIMNAMES <- dimnames(flq)
+DIM[6] <- length(uiter)
+DIMNAMES[[6]] <- ac(uiter)
+catch.q_new <- FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+if(!eqsim_lut[[stk_name]]$sel_const){ # sample years if not const mean value used
+  for(i in uiter){
+    samp.yrs <- sample(x = eqsim_lut[[stk_name]]$sel_years,
+                       size = length(proj.yrs), replace = T)
+    catch.q_new[, proj.yrs,,,,i] <- flq[,ac(samp.yrs)]
+  }
+}else{ # const mean value used
+  for(i in uiter){
+    mean.yrs <- eqsim_lut[[stk_name]]$sel_years
+    catch.q_new[, proj.yrs,,,,i] <- apply(flq[,ac(mean.yrs)],
+                                          MARGIN = c(1,3,4,5,6),
+                                          mean, na.rm = TRUE)
+  }
+}
+
+# ind weight (stock, landings, discards)
+# incl mat? m?
+flq <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt
+DIM <- dim(flq)
+DIMNAMES <- dimnames(flq)
+DIM[6] <- length(uiter)
+DIMNAMES[[6]] <- ac(uiter)
+m_new <- mat_new <- stock.wt_new <- 
+  landings.wt_new <- discards.wt_new <- 
+  landings.sel_new <- discards.sel_new <- 
+  FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+
+if(!eqsim_lut[[stk_name]]$bio_const){ # sample years if not const mean value used
+  for(i in uiter){
+    samp.yrs <- sample(x = eqsim_lut[[stk_name]]$bio_years, size = length(proj.yrs), replace = T)
+    
+    mat_new[, proj.yrs,,,,i] <- biols[[nameChange(stk_name)]]@mat$mat[,ac(samp.yrs)]
+    m_new[, proj.yrs,,,,i] <- biols[[nameChange(stk_name)]]@m[,ac(samp.yrs)]
+    stock.wt_new[, proj.yrs,,,,i] <- biols[[nameChange(stk_name)]]@wt[,ac(samp.yrs)]
+    
+    landings.wt_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt[,ac(samp.yrs)]
+    discards.wt_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.wt[,ac(samp.yrs)]
+    landings.sel_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.sel[,ac(samp.yrs)]
+    discards.sel_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.sel[,ac(samp.yrs)]
+  }
+}else{ # const mean value used
+  for(i in uiter){
+    mean.yrs <- eqsim_lut[[stk_name]]$bio_years
+    
+    mat_new[, proj.yrs,,,,i] <- apply(biols[[nameChange(stk_name)]]@mat$mat[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    m_new[, proj.yrs,,,,i] <- apply(biols[[nameChange(stk_name)]]@m[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    stock.wt_new[, proj.yrs,,,,i] <- apply(biols[[nameChange(stk_name)]]@wt[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    
+    landings.wt_new[, proj.yrs,,,,i] <- apply(fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    discards.wt_new[, proj.yrs,,,,i] <- apply(fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.wt[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    landings.sel_new[, proj.yrs,,,,i] <- apply(fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.sel[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    discards.sel_new[, proj.yrs,,,,i] <- 1-landings.sel_new[, proj.yrs,,,,i]
+  }
+}
+```
+
+## Env. Period Setup
+
+As we did for the growth model already, we also need to setup the environmental data used
+by the stock-recruitment relationship in those periods (2030, 2040, 2050) and RCPs.
+
+```{r Define environmental data for specific periods}
+# replace the EMSRRs by a "no change climate signal" (aka. RCP4.5 without trend)
+# remove the median signal from it.
+
+if(stk_name %in% emsrr_lut$stk_flbeia){
+  tmp = get(emsrr_lut$model.obj[emsrr_lut$stk_flbeia == stk_name])
+  tmp$env.variables$climate.projections$noCC <- tmp$env.variables$climate.projections$rcp45
+  tmp$env.variables$climate.projections$noCC = lapply(tmp$env.variables$climate.projections$noCC, function(x) {
+    med = apply(x[, -1], 1, median)
+    df = data.frame(year = x[, 1], x[, -1] - med + med[1]) 
+    # correction for the intercept
+    return(df)
+  })
+  # calc.mean over respective periods
+  lst_means = list()
+  for(r in c("rcp45","rcp85")){
+    lst_means[[r]] = list()
+    for(p in periods){
+      tmp_rcp = tmp$env.variables$climate.projections[[r]]
+      lst_means[[r]][[ac(p)]] = lapply(tmp_rcp,function(x){
+        iter.period_mean = apply(x[x$year >= p & x$year < p+10,-1],2,mean)
+        tot.period_mean = mean(iter.period_mean)
+        # remove trend
+        med = apply(x[,-1],1,median)
+        #shift to level of the period average
+        df = data.frame(year = x[,1],x[,-1] - med + tot.period_mean)
+        return(df)})
+      # put into original environmental data list as "new" scenarios
+      tmp$env.variables$climate.projections[[paste(r,p,sep = "_")]] <- lst_means[[r]][[ac(p)]]
+      }
+    }
+  assign(emsrr_lut$model.obj[emsrr_lut$stk_flbeia == stk_name],value = tmp)
+}
+```
+
+## Setup simulation function
+
+Definition of the simulation function that gets executed in parallel:
+
+```{r Parallel Setup}
+# parallel execution function -----
+parFun <- function(x){
+  library(FLBEIA)
+  
+	# scen info
+	scen.x <- scen[x,]
+	iter.x <- scen.x$iter
+	rcp.x <- as.character(scen.x$clim.scen)
+	period.x <- as.character(scen.x$period)
+	gr = scen.x$growth
+	envR = scen.x$emsrr
+  # update target F
+  advice.ctrl.x <- advice.ctrl
+  advice.ctrl.x[[nameChange(stk_name,"new")]]$ref.pts["Fmsy",] <- scen.x$Ftarg
+  # check more soft advice options
+  advice.ctrl.x[[nameChange(stk_name,"new")]]$wts.nyears = 3
+  advice.ctrl.x[[nameChange(stk_name,"new")]]$fbar.nyears = 3
+  
+  # if not using hcr, the update ref points to allow fishing at constant F (i.e. removes slope)
+  if(!scen.x$hcr){
+    advice.ctrl.x[[nameChange(stk_name,"new")]]$ref.pts["Btrigger",] <- 0
+  }
+  
+  # update srr and add uncertainty if stochastic scenario
+  set.seed(12345 + iter.x) 
+  if(rcp.x %in% c("rcp45","noCC") & envR == T){
+    SRs.x <- SRs_rcp45
+  } else if(rcp.x == "rcp85" & envR == T){
+    SRs.x <- SRs_rcp85
+  } else {
+    SRs.x <- SRs
+    SRs.x[[1]]@model <- srr_pars_sub$model.fslr[iter.x]
+    SRs.x[[1]]@params["a",,,] <- srr_pars_sub$a[iter.x]
+    SRs.x[[1]]@params["b",,,] <- srr_pars_sub$b[iter.x]
+  }
+  
+  if(envR == T){
+    # ---------------------------------------------- #
+    # use the bootstrapped model as prediction model
+    # for the EMSRR to include parameter uncertainty
+    # ---------------------------------------------- #
+    
+    assign(paste0(emsrr_lut$stk_long[emsrr_lut$stk_flbeia == stk_name],
+                  ".rec.model"),
+           model_obj_sub[[iter.x]])
+  
+  # ---------------------------------- #
+  # change the covars in the SR-object
+  # ---------------------------------- #
+  # replace the stored mean over all iterations 
+  # with the specified climate scenario run
+
+  if(stk_name %in% emsrr_lut$stk_flbeia){
+    # get the emsrr fitted model object with the stored covariates
+    emsrr.obj = get(emsrr_lut$model.obj[emsrr_lut$stk_flbeia == stk_name])
+    # a combination of RCP-scenario and the 10yr averaging period (2030s,2040s,2050s)
+    rcp_scen_name = ifelse(rcp.x == "noCC",rcp.x,paste(rcp.x,period.x,sep ="_"))
+    env.vars = emsrr.obj$env.variables$climate.projections[[rcp_scen_name]]
+    # put into respective slots
+    for(nn in names(SRs.x[[nameChange(stk_name,"new")]]@covar)){
+      years = as.numeric(dimnames(SRs.x[[nameChange(stk_name,"new")]]@covar[[nn]])$year)
+      # replace covars
+      SRs.x[[nameChange(stk_name,"new")]]@covar[[nn]][,as.character(years) %in% env.vars[[nn]]$year,] = env.vars[[nn]][env.vars[[nn]]$year %in% years,iter.x+1]
+    }
+  }
+  
+  }
+  # other objects
+  fleets.x <- fleets
+  biols.x <- biols
+  biols.ctrl.x = biols.ctrl
+  fleets.ctrl.x = fleets.ctrl
+  
+  # update resampled slots if stochastic sim
+  if(!scen$det[x]){
+    # SR uncertainty
+    if(stochastic_sr){
+			SRs.x[[1]]@uncertainty[, proj.yrs] <- SR_uncertainty[, proj.yrs,,,,iter.x]
+		}
+    
+    # selectivity
+    if(stochastic_sel){
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name, "new")]]@catch.q[, proj.yrs] <- catch.q_new[, proj.yrs, , , , iter.x]
+    }
+      
+    # bio
+    if(stochastic_bio){
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name,"new")]]@landings.wt[,proj.yrs] <- landings.wt_new[, proj.yrs,,,,iter.x]
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name,"new")]]@discards.wt[,proj.yrs] <- discards.wt_new[, proj.yrs,,,,iter.x]
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name,"new")]]@landings.sel[,proj.yrs] <- landings.sel_new[, proj.yrs,,,,iter.x]
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name,"new")]]@discards.sel[,proj.yrs] <- discards.sel_new[, proj.yrs,,,,iter.x]
+      
+      biols.x[[nameChange(stk_name,"new")]]@wt[,proj.yrs] <- stock.wt_new[, proj.yrs,,,,iter.x]
+      biols.x[[nameChange(stk_name,"new")]]@mat$mat[,proj.yrs] <- mat_new[, proj.yrs,,,,iter.x]
+    }
+  }
+  
+  if(gr){
+    # ------------------------ #
+    # update covars for growth
+    # ------------------------ #
+    
+    # create FLQuant based on iteration and rcp-scenario
+    # a combination of RCP-scenario and the 10yr averaging period (2030s,2040s,2050s)
+    rcp_scen_name = ifelse(rcp.x == "noCC",rcp.x,paste(rcp.x,period.x,sep ="_"))
+    covars.GrowthEnv = prep_GrowthEnv_covars(covars.df[[rcp_scen_name]][[iter.x]],
+                                             first.yr = first.yr,
+                                             last.yr = last.yr)
+    
+    # draw a q sample
+    fleets_q_yrs_draw = list()
+    for(flt in names(fleets_q_yrs_sample)){
+      mts = names(fleets_q_yrs_sample[[flt]])
+      for(mt in mts){
+        stks = names(fleets_q_yrs_sample[[flt]][[mt]])  
+        for(stk in stks){
+          # the sampled interannual catchability 
+          fleets_q_yrs_draw[[flt]][[mt]][[stk]] = fleets_q_yrs_sample[[flt]][[mt]][[stk]][,iter.x]
+        }
+      }
+    }
+    # add as object to the SMFB.growth function
+    #formals(SMFB.growth)$fleets_q_yrs_sample = fleets_q_yrs_draw 
+    covars_catchability = prep_catchability_covars(fleets_q_yrs_draw,years = first.yr:last.yr)
+    # uncertainty on the wt-relationship
+    covars.wt.uncertainty = prep_Growth.Uncertainty.by.age_covars(wt.noise.per.stk[wt.noise.per.stk$iter == iter.x,],
+                                                                  first.yr = first.yr,
+                                                                  last.yr = last.yr)
+    
+    # join covars
+    covars.x = c(covars.GrowthEnv,covars.wt.uncertainty,covars_catchability)
+    
+    # ---------------------------------------------- #
+    # update wgts with resampled recruitment weights
+    # ---------------------------------------------- #
+    for(rr in names(stks_recWgts_sample)){
+      biols.x[[rr]]@wt[1,] <- stks_recWgts_sample[[rr]][rownames(stks_recWgts_sample[[rr]]) %in% ac(first.yr:last.yr),iter.x]
+    }
+  } else{
+    covars.x = covars
+    fleets.ctrl.x$fl1$effort.model = "SMFB"
+    biols.ctrl.x = lapply(biols.ctrl.x,function(x){
+      x$growth.model = "ASPG"
+      return(x)})
+  }
+  
+  # run simulations
+    res <- FLBEIA(
+      biols = biols.x, # updated 
+      SRs = SRs.x, # updated 
+      BDs = BDs, 
+      fleets = fleets.x, # updated 
+      covars = covars.x, # updated 
+      indices = indices, 
+      advice = advice,
+      main.ctrl = main.ctrl, # updated 
+      biols.ctrl = biols.ctrl.x, # updated 
+      fleets.ctrl = fleets.ctrl.x, # updated 
+      covars.ctrl = covars.ctrl,
+      obs.ctrl = obs.ctrl, 
+      assess.ctrl = assess.ctrl, 
+      advice.ctrl = advice.ctrl.x # updated
+    )
+  
+  # ---------------------------------- #
+  # return stock-obj
+  
+  stk.obj <- biolfleets2flstock(biol = res$biols[[1]], fleets = res$fleets)
+  # save Ftarget & iter
+  attributes(stk.obj)$Ftarget <- scen$Ftarg[x]
+  attributes(stk.obj)$iter <- iter.x
+  
+  # return result
+  gc()
+  return(stk.obj)
+}
+```
+
+## Simulation
+
+Now we can simulate for the pre-defined scenarios. However, as this is quite computational
+expensive (\~12h on 20 server-cores), we skip this here and only look at the prepared
+output.
+
+```{r Simulating,eval = F}
+clusterType <- ifelse(Sys.info()["sysname"] == "Windows", "PSOCK", "FORK")
+
+# define exactly what to export to each worker and what not:
+# (to avoid RAM filling up too quickly...)
+if(length(stk_long) != 0){
+  obj_exclude = grep(paste(sub(stk_long, "", grep(
+    stk_long, ls(), value = T
+  )), collapse = "|"), ls(), value = T)
+obj_exclude = obj_exclude[!grepl(stk_long,obj_exclude)]
+obj_exclude = c(obj_exclude,"EMSRRs_boot")
+} else {
+  obj_exclude = "EMSRRs_boot"
+}
+ARGS <- ls()[!(ls() %in% obj_exclude)]
+
+# run in parallel for faster execution
+n.cores = 20 # define manually...
+cl <- parallel::makeCluster(n.cores, type=clusterType)
+nn <- split(seq(niter), seq(niter))
+start.time = Sys.time()
+parallel::clusterExport(cl, varlist = ARGS, envir=environment())
+RES <- parLapply(cl, nn, parFun)
+stopCluster(cl)
+end.time = Sys.time()
+time.taken = end.time - start.time
+print(time.taken)
+
+# export objects
+iterRan <- paste(range(unique(scen$iter)), collapse = "-", sep = "-")
+# save a list of stock objects...
+save(RES, file = file.path("model", "refpts",
+                           paste0(stk_name,
+                                  "_emsrr_growth",
+                                  "_iter", iterRan,
+                                  "_stkObj.Rdata")))
+save(scen, file = file.path("model", "refpts",
+                            paste0(stk_name,
+                                   "_emsrr_growth",
+                                   "_iter", iterRan,
+                                   "_scen.Rdata")))
+
+# end
+```
+
+## Summarise results
+
+We now summarise the results and calculate the changes in Ref-pts (in terms of Btrigger
+and Fmsy) for the different periods.
+
+```{r Summarise outputs}
+
+load(file = "../data/BRPs.Rdata")
+BRPs2 <- BRPs
+
+# global settings ------------------------------------------------------
+
+rcps = c("noCC","rcp45","rcp85")
+BRPs2[,paste(rep(c("FLBEIA_Fmsy","FLBEIA_Fp05"),
+                 each = length(rcps)),rcps,sep = "_")] <- NaN
+
+# get output of MSE-simulations
+stk.obj_list = list.files("../model/refpts/","stkObj")
+# read in 
+# produce an overall list with ref.point changes
+Ref_changes_list = list()
+
+# get max historical year of the stock-obj
+max.hist.yr = max(an(dimnames(stock)$year))
+  
+# get RES obj.
+# load stock objects that are output from the MSE runs
+load(file.path("../model/refpts/",grep(stk_name,stk.obj_list,value = T)))
+# RES = list of stock-obj over all iterations
+max.forecast.yr = unique(sapply(RES,function(x) max(an(dimnames(x)$year))))
+  
+# collate all scen objects
+fnames <- list.files(path = "../model/refpts", pattern = c(stk_name), include.dirs = F)
+  fnames <- fnames[grep(pattern = "scen", fnames)]
+  tmp <- vector("list", length(fnames))
+  for(i in seq(fnames)){
+    tmp.i <- load(file.path("../model/refpts", fnames[i]))
+    tmp[[i]] <- get(tmp.i)
+  }
+  scen <- do.call("rbind", tmp)
+  
+  # calculate prob of being below Blim by Ftarg with hcr scenarios
+  
+  # calculate median ssb & landings of all stock-obj over the last 10 years
+  scen.ssb.land = lapply(RES,function(x){
+    ssb.median = median(ssb(x)[,ac((max.forecast.yr-9):max.forecast.yr),])
+    landings.median = median(landings(x)[,ac((max.forecast.yr-9):max.forecast.yr),])
+    return(data.frame(ssb = ssb.median,landings = landings.median))
+  })
+  scen.ssb.land = do.call(rbind,scen.ssb.land)
+  # add to scen
+  scen = cbind(scen,scen.ssb.land)
+  
+  scen$BBlim <- scen$ssb / BRPs2[stk_name,]$Blim
+  
+  # get unique combinations of climate scenario & avg. period
+  rcp_periods = unique(paste(scen$clim.scen,scen$period,sep = "_"))
+  
+  # calculate refernce Fmsy, Bmsy, and Btrigger reference points -----
+  refptsNew <- vector("list", length(rcp_periods))
+  names(refptsNew) <- rcp_periods  
+  for(ii in rcp_periods){
+    mat <- with(scen, which(hcr == FALSE & clim.scen == sub("_.*","",ii) & period == sub(".*_","",ii)))
+    # head(scen[mat,])
+    scensub_period <- scen[mat,]
+    
+    # smooth landings
+    splL <- smooth.spline(x = scensub_period$Ftarg, y = scensub_period$landings, spar = 0.1)
+    newdatL <- data.frame(x = seq(min(scensub_period$Ftarg), max(scensub_period$Ftarg), length.out = 1000))
+    newdatL$y <- predict(splL, x = newdatL$x)$y
+    
+    # smooth ssb
+    splS <- smooth.spline(x = scensub_period$Ftarg, y = scensub_period$ssb, spar = 0.1)
+    newdatS <- data.frame(x = seq(min(scensub_period$Ftarg), max(scensub_period$Ftarg), length.out = 1000))
+    newdatS$y <- predict(splS, x = newdatS$x)$y
+    
+    # smooth 5% ssb
+    agg <- aggregate(ssb ~ Ftarg, data = scensub_period, quantile, prob = 0.05)
+    splSQ <- smooth.spline(x = agg$Ftarg, y = agg$ssb, spar = 0.1)
+    newdatSQ <- data.frame(x = seq(min(agg$Ftarg), max(agg$Ftarg), length.out = 1000))
+    newdatSQ$y <- predict(splSQ, x = newdatS$x)$y
+    
+    hitmax <- which.max(newdatL$y)
+    MSY <- newdatL$y[hitmax]
+    Fmsy <- newdatL$x[hitmax]
+    FmsyCI <- range(newdatL$x[which(newdatL$y > MSY*0.95)]) # range of Ftarget +/- Fmsy
+    hitL <- which(newdatL$x==FmsyCI[1])
+    hitU <- which(newdatL$x==FmsyCI[2])
+    FmsyL <- newdatL$x[hitL]
+    FmsyU <- newdatL$x[hitU]
+    Bmsy <- newdatS$y[hitmax]
+    Btrigger <- newdatSQ$y[hitmax]
+    
+    # record results
+    sumL <- list(stock = stk_name, period = ii, 
+      MSY = MSY, Fmsy = Fmsy, FmsyL = FmsyL, FmsyU = FmsyU, Bmsy = Bmsy, Btrigger = Btrigger, 
+      newdatL = newdatL, newdatS = newdatS, newdatSQ = newdatSQ)
+    
+    refptsNew[[ii]] <- sumL
+    
+    print(paste(stk_name, ii, "is finished"))
+}
+```
+
+## Analyse Output
+
+Now we visualise the output.
+
+```{r Analyse output,warning=F,error=F}
+
+dfref <- vector("list", length(stk_name))
+dfts <- vector("list", length(stk_name)) 
+
+scen_codes <- names(refptsNew)
+clim <-  sub("_.*","", scen_codes)
+period <- sub(".*_","", scen_codes)
+
+
+df.i <- data.frame(stock = stk_name, climate = clim, period = period)  
+df.i$Fmsy <- unlist(lapply(refptsNew, FUN = function(x){x$Fmsy}))
+df.i$Bmsy <- unlist(lapply(refptsNew, FUN = function(x){x$Bmsy}))
+df.i$Btrigger <- unlist(lapply(refptsNew, FUN = function(x){x$Btrigger}))  
+df.i$MSY <- unlist(lapply(refptsNew, FUN = function(x){x$MSY})) 
+df.i
+  
+  ts.i <- vector("list", length(refptsNew))
+  for(ii in seq(refptsNew)){
+    L <- refptsNew[[ii]]$newdatL
+    names(L) <- c("Ftarget", "Landings")
+    S <- refptsNew[[ii]]$newdatS
+    names(S) <- c("Ftarget", "SSB")
+    SQ <- refptsNew[[ii]]$newdatSQ
+    names(SQ) <- c("Ftarget", "SSBq05")
+    ts.ii <- merge(x = L, y = S, all = T)
+    ts.ii <- merge(x = ts.ii, y = SQ, all = T)
+    ts.ii$period <- period[ii]
+    ts.ii$climate <- clim[ii]
+    ts.ii$stock <- stk_name
+    # head(ts.ii)
+    ts.i[[ii]] <- ts.ii
+  }
+  ts.i <- do.call("rbind", ts.i)
+  ts.i <- merge(x = ts.i, y = df.i) 
+ 
+  dfref[[i]] <- df.i
+  dfts [[i]] <- ts.i
+
+dfref <- do.call("rbind", dfref)
+dfts <- do.call("rbind", dfts)
+
+unique(dfref$climate)
+unique(dfref$period)
+
+dfref$period <- replace(dfref$period, dfref$period == "None", "Current")
+dfref$period <- factor(dfref$period, levels = c("Current", "2030", "2040", "2050"))
+
+dfts$period <- replace(dfts$period, dfts$period == "None", "Current")
+dfts$period <- factor(dfts$period, levels = c("Current", "2030", "2040", "2050"))
+
+# change current
+tmp <- subset(dfref, climate == "noCC")
+tmp1 <- tmp2 <- tmp
+tmp1$climate  <- "rcp45"
+tmp2$climate  <- "rcp85"
+dfref <- rbind(dfref, tmp1, tmp2)
+
+tmp <- subset(dfts, climate == "noCC")
+tmp1 <- tmp2 <- tmp
+tmp1$climate  <- "rcp45"
+tmp2$climate  <- "rcp85"
+dfts <- rbind(dfts, tmp1, tmp2)
+
+
+dfref <- subset(dfref, climate != "noCC")
+dfts <- subset(dfts, climate != "noCC")
+
+str(dfref)
+str(dfts)
+
+head(dfref)
+dfref2 <- reshape2::melt(dfref, id = c("stock", "climate", "period"))
+head(dfref2)
+
+p <- ggplot(data = dfref2) + 
+  aes(x = period, y = value, color = climate, group = climate) + 
+  facet_grid(variable~stock, scales = "free_y") + 
+  geom_point(size = 2) + 
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Fmsy
+p1 <- ggplot(data = dfref) + 
+  aes(x = period, y = Fmsy, color = climate, group = climate) + 
+  facet_wrap(~stock, nrow = 1, scales = "free_y") + 
+  geom_point(size = 2) + 
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Bmsy
+p2 <- ggplot(data = dfref) + 
+  aes(x = period, y = Bmsy, color = climate, group = climate) + 
+  facet_wrap(~stock, nrow = 1, scales = "free_y") + 
+  geom_point(size = 2) + 
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Btrigger
+p3 <- ggplot(data = dfref) + 
+  aes(x = period, y = Btrigger, color = climate, group = climate) + 
+  facet_wrap(~stock, nrow = 1, scales = "free_y") + 
+  geom_point(size = 2) + 
+  geom_line() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+p <- (p1 | p2 | p3) +
+  plot_layout(guides = "collect", axes = "collect_x", axis_titles = "collect_x")
+print(p)
+
+# yield curve --------------------------------------------------------
+
+p1 <- ggplot(data = subset(dfts, stock == stk_name)) + 
+    aes(x = Ftarget, y = Landings, color = period, group = period) + 
+    facet_wrap(~climate, ncol = 1) +
+    geom_line() + 
+    geom_point(data = subset(dfref, stock == stk_name), 
+               mapping = aes(x = Fmsy, y = MSY)) 
+
+p2 <- ggplot(data = subset(dfts, stock == stk_name)) + 
+    aes(x = Ftarget, y = SSB, color = period, group = period) + 
+    facet_wrap(~climate, ncol = 1) +
+    geom_line() + 
+    geom_point(data = subset(dfref, stock == stk_name), 
+               mapping = aes(x = Fmsy, y = Bmsy)) 
+  
+p <- (p1 | p2) +
+    plot_annotation(title = stk_name) & 
+    plot_layout(guides = "collect", axes = "collect_x")
+print(p)
+  
+```
