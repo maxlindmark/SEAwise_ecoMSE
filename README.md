@@ -81,9 +81,9 @@ install.packages(c("modelr","nlstools","MuMIn","rlist","formula.tools","corrplot
 ### 03. practical on model selection
 
 ```R
-install.packages(c(
-  "corrplot", "doRNG", "dplyr", "forecast", "GA", "ggplot2", 
-  "glmmTMB", "knitr", "memoise", "MuMIn", "parallel", "patchwork", "tidyr"))
+install.packages(c("corrplot", "doRNG", "dplyr", "forecast", "GA", "ggplot2", 
+  "glmmTMB", "icesAdvice", "knitr", "memoise", "MuMIn", "parallel", 
+  "patchwork", "tidyr"))
 ```
 
 ## Day 3
