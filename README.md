@@ -9,7 +9,10 @@ Repository for training course material
 
 In order to save some time during the course, make sure you have the following R-packages installed. We grouped those by each practical/exercise in case you have some troubles installing a few packages, so you could at least follow the other tutorials. 
 
-### day 1 - 01. practical on env. data pre-processing
+## Day 1
+-----
+
+### 01. practical on env. data pre-processing
 
 - from CRAN:
 ```R
@@ -24,7 +27,7 @@ devtools::install_github("BernhardKuehn/marmalaid")
 devtools::install_github("coatless-rd-rcpp/rcpp-and-doparallel")
 devtools::install_github("BernhardKuehn/fast.EOT")
 ```
-### day 1 - 02. practical on bias-correction
+### 02. practical on bias-correction
 
 - from CRAN:
 ```R
@@ -39,7 +42,7 @@ devtools::install_version("rgeos", version = "0.6.4", repos = "http://cran.us.r-
 ```R
 devtools::install_github("BernhardKuehn/marmalaid")
 ```
-### day 1 - 03. practical on integrating env. uncertainty via BVARs
+### 03. practical on integrating env. uncertainty via BVARs
 
 - from CRAN:
 ```R
@@ -54,7 +57,11 @@ install.packages(c("raster","terra","maps","plyr",
 ```
 devtools::install_github("BernhardKuehn/marmalaid")
 ```
-### day 2 - 04. practical on model fitting to growth data
+
+## Day 2
+-----
+
+### 01. practical on model fitting to growth data
 ```R
 install.packages(c(
   "glmmTMB", "RTMB", 
@@ -66,25 +73,28 @@ install.packages(c(
 
 ```
 
-### day 2 - 05. practical on model fitting to recruitment
+### 02. practical on model fitting to recruitment
 ```R
 install.packages(c("modelr","nlstools","MuMIn","rlist","formula.tools","corrplot"))
 ```
 
-### day 2 - 06. practical on model selection
+### 03. practical on model selection
 
 ```R
-install.packages(c(
-  "corrplot", "doRNG", "dplyr", "forecast", "GA", "ggplot2", 
-  "glmmTMB", "knitr", "memoise", "MuMIn", "parallel", "patchwork", "tidyr"))
+install.packages(c("corrplot", "doRNG", "dplyr", "forecast", "GA", "ggplot2", 
+  "glmmTMB", "icesAdvice", "knitr", "memoise", "MuMIn", "parallel", 
+  "patchwork", "tidyr"))
 ```
 
-### day 3 - 01. Practical on including environmental forcing into stock recruitment in MSE
+## Day 3
+-----
+
+### 01. Practical on including environmental forcing into stock recruitment in MSE
 
 To prepare for the section where we will run some MSEs with environmentally mediated data, you will need to install and experimental version of smsR in R, and read the WKECOMSE report available on the sharepoint.
 To install smsR directly from Github you need to have the library remotes installed.
 
-```
+```R
 if('remotes' %in% installed.packages()[,"Package"] ) == FALSE) install.packages('remotes')
 remotes::install_github("https://github.com/nissandjac/smsR", dependencies = TRUE) # Change this link to the development version
 ```
@@ -93,7 +103,7 @@ This installs the package smsR, which is a seasonal stock assessment model, that
 
 To test if the model is properly working you can run the sandeel stock assessment included in the package as
 
-```
+```R
 library(smsR)
 
 # Set up sandeel for area 1r
@@ -131,10 +141,23 @@ sas <- runAssessment(df.tmb, parms)
 
 And if the run was successful you can plot the output results easily as
 
-```
+```R
 plot(sas) # Plots general stock assessment output
 
 ```
 
 This is a fairly simple model that runs without any climatic or other external data, but works as a baseline assessment model. 
 
+### 03. practical on MSEs with FLBEIA
+
+- from CRAN:
+```R
+install.packages( c("plyr","stringr","reshape2","glmmTMB",
+                    "earth","ggplot2","patchwork"))
+```
+- from FLR:
+```R
+install.packages( c("FLCore", "FLFleet", "FLBEIA",
+                    "FLash", "FLAssess"), 
+                  repos="http://flr-project.org/R")
+```
