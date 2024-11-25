@@ -110,7 +110,7 @@ The data for this tutorial can be downloaded directly from figshare.
 # automatically download input files for the tutorial from figshare
 
 # url for the data for the tutorial on "ways to summarise env data"
-url = "https://figshare.com/ndownloader/files/50656029?private_link=b349a8f507ac4d85b5fc"
+url = "https://figshare.com/ndownloader/files/50777073?private_link=b349a8f507ac4d85b5fc"
 
 # specify data to download
 fn <- "data.zip"
@@ -507,5 +507,17 @@ All in all, there are different approaches available to summarise the informatio
 Data-driven dimension reduction has the advantage of effectively utilising the information contained in the environmental field, but does not necessarily perfectly match the spatio-temporal scale of the biological process. Hypothesis-based spatial averaging can be adapted to more closely resemble the known scale of the stock, but might be redundant in the selection of patterns.   
 
 Which of those approaches to prefer is up to discussion and not the focus of this tutorial, since it is very much related to the specific stock, the biological process of interest and the type of environmental variables considered. However, it should be understood that this tutorial is meant to give you tools at hand to get your covariate of interest, but does not replace a proper literature investigation and generate hypothesis first, rather than going through all potential possibilities with the risk of spurious discoveries. 
+
+## Exercises
+
+Now that we performed the whole analysis on SST for the North Sea we can try it on a different dataset.
+In the downloaded data you find a Salinity dataset `AHOI_SurfaceSalt_raster_1948_2020.tif`, which is a pre-processed surface salinity dataset for the same area. The exercise now is to go through the provided script and just try to work with the new dataset. 
+
+1. Load in the new salinity dataset
+2. Pre-process and crop the data
+3. calculate seasonal averages, but now for the spring month (MAM - month: 3-5)
+4. calculate spatial averages
+5. try to perform an EOF/EOT/clustering-analysis (if time allows)
+6. correlate the resulting time series and see how well they match/differ
 
 ## References 
