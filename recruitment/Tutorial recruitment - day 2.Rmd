@@ -63,6 +63,7 @@ library(corrplot)
 The second step is the load the data for fitting the recruitment models:
 + pairs recruits-SSB from stock assessment models. In this example we will use the last stock assessment results of European hake in Adriatic Sea, publicly available https://www.fao.org/gfcm/data/star/en/;
 + environmental variables: the time series of sst (sea surface temperature), botT (bottom temperature), sal (salinity), botsal (bottom salinity) and nppv (net primary production) was derived from Copernicus spatial data, averaging the grid cells values between 50 and 500 m (preferred habitat of the species). 
+Both data sets are also available here: https://figshare.com/s/6ffe7e46031b4990894e
 
 ```{r data, echo=TRUE, warning = FALSE, message = FALSE}
 load("Recruitment_tutorial_data.Rdata")
