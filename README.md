@@ -16,7 +16,10 @@ In order to save some time during the course, make sure you have the following R
 
 - from CRAN:
 ```R
-install.packages( c("raster","terra","maps","sf","kohonen","corrplot","PCDimension","devtools"))
+install.packages( c("raster","terra","maps","sf",
+                    "kohonen","corrplot",
+                    "PCDimension","devtools",
+                    "cleanrmd","basetheme"))
 # additionally some packages are already archived on CRAN, so you need to install the last available version
 devtools::install_version("maptools", version = "1.1.8", repos = "http://cran.us.r-project.org")
 devtools::install_version("rgeos", version = "0.6.4", repos = "http://cran.us.r-project.org")
@@ -33,6 +36,7 @@ devtools::install_github("BernhardKuehn/fast.EOT")
 ```R
 install.packages(c("raster","terra","maps",
                    "reshape2","qmap","ggplot2",
+                   "ggdark","cleanrmd","basetheme",
                    "devtools","parallel","doParallel","foreach"))
 # additionally some packages are already archived on CRAN, so you need to install the last available version
 devtools::install_version("maptools", version = "1.1.8", repos = "http://cran.us.r-project.org")
@@ -48,10 +52,11 @@ devtools::install_github("BernhardKuehn/marmalaid")
 ```R
 install.packages(c("raster","terra","maps","plyr",
                    "BVAR","scam","mgcv","reshape2",
-                   "devtools","parallel","doParallel","doSnow",
+                   "devtools","parallel","doParallel","doSNOW",
                    "foreach","funtimes","coda","tsDyn",
                    "gsignal","FNN","Rcpp","RcppEigen",
-                   "RcppArmadillo","ggplot2","colorspace","patchwork"))
+                   "RcppArmadillo","ggplot2","colorspace",
+                   "patchwork","ggdark","cleanrmd","basetheme"))
 ```
 - from github:
 ```
