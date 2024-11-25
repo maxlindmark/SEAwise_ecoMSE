@@ -10,7 +10,8 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## Introduction
-To test the significance of environmental variables on recruitment process, first we need to select meaningful covariates. The environmental time series used in this tutorial have been derived from Copernicus (https://www.copernicus.eu/en). 
+
+To test the significance of environmental variables on recruitment process, first we need to select meaningful covariates. The environmental time series used in this tutorial have been derived from Copernicus (https://www.copernicus.eu/en, reanalysis approach on Bernhard presentation)
 
 The variables here considered are: 
 
@@ -336,6 +337,11 @@ legend("topright",legend=legend_names,col=legend_color,lwd=c(2,2),lty=legend_lty
 
 In this case we do not explore models with three covariates, because of the correlation among them.
 
+# Summary table preparation
+
+A draft summary table is here produced. Looking to the results, the model having the best predictive capability is the one depending only on SST.
+
+
 ```{r summary table, echo=TRUE, warning = FALSE, message = FALSE}
 
 table_res<-as.data.frame(table_res)
@@ -359,3 +365,14 @@ table_res$rMAE=table_res$MAE/table_res[1,]$MAE
 knitr::kable(table_res,digits=2)
 
 ```
+
+# Conclusions
+
+Note that here only the BevHolt model estimation was reported, but Ricker and hockey stick were also explored in SEAwise. 
+
+Using the presented approach it is possible to explore any SRR model just adapting the script. It would be also possible to adapt the scipt to fit EMSRR applying a model error approach (in case a robust and contrasted dataset is available).
+
+More complex indicators can be introduced following Marc presentation on model selection. 
+
+
+
