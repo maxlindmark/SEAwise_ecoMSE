@@ -1,6 +1,6 @@
 ---
 title: "How to generate multiple runs from climate projections?"
-author: "Bernhard Kuehn"
+author: "Bernhard Kuehn - Thuenen SF"
 date: "`r format(Sys.time(), '%d-%m-%Y')`"
 bibliography: BVAR_tutorial.bib  
 link-citations: true
@@ -9,13 +9,39 @@ output:
     toc: true
     mathjax: default
     use_fontawesome: true
-    theme: new.css
-    highlight: "espresso"
+    theme: water-dark
+    highlight: "breezedark"
     df_print: paged
+    self_contained: true
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE,cache.lazy = FALSE)
+```
+
+
+```{css, echo=FALSE}
+p {
+ font-size: 18px;
+ width: 800px;
+ max-width: 1100px;
+}
+h1 {
+  width: 800px;
+}
+h2 {
+  width: 800px;
+}
+div {
+  font-size: 16px;
+  width: 800px;
+  max-width: 1100px;
+}
+pre {
+  font-size: 16px;
+  width: 800px;
+  max-width: 1100px;
+}
 ```
 
 ## Introduction
@@ -43,10 +69,13 @@ In order to execute the code in this tutorial you should have the following pack
 [RcppEigen](https://cran.r-project.org/web/packages/RcppEigen/),
 [RcppArmadillo](https://cran.r-project.org/web/packages/RcppArmadillo/),
 [ggplot2](https://cran.r-project.org/web/packages/ggplot2/),
+[ggdark](https://cran.r-project.org/web/packages/ggdark/),
 [colorspace](https://cran.r-project.org/web/packages/colorspace/),
 [patchwork](https://cran.r-project.org/web/packages/patchwork/),
-[devtools](https://cran.r-project.org/web/packages/devtools/)
-[cleanrmd](https://cran.r-project.org/web/packages/cleanrmd/)
+[devtools](https://cran.r-project.org/web/packages/devtools/),
+[cleanrmd](https://cran.r-project.org/web/packages/cleanrmd/),
+[basetheme](https://cran.r-project.org/web/packages/basetheme/)
+
 - github: [marmalaid](https://github.com/BernhardKuehn/marmalaid)
 
 ```{r Install packages,message=F,warning=F,eval=FALSE}
@@ -56,8 +85,9 @@ install.packages(c("raster","terra","maps","plyr",
                    "devtools","doParallel","doSnow",
                    "foreach","funtimes","coda","tsDyn",
                    "gsignal","FNN","Rcpp","RcppEigen",
-                   "RcppArmadillo","ggplot2","colorspace",
-                   "patchwork","cleanrmd"))
+                   "RcppArmadillo","ggplot2","ggdark",
+                   "colorspace","patchwork",
+                   "cleanrmd","basetheme"))
 devtools::install_github("BernhardKuehn/marmalaid")
 ```
 
@@ -66,7 +96,7 @@ devtools::install_github("BernhardKuehn/marmalaid")
 # for analysis
 library(raster)
 library(terra)
-library(marmalaid) # devtools::install_github("BernhardKuehn/marmalaid")
+library(marmalaid) 
 library(BVAR)
 library(scam)
 library(mgcv)
@@ -90,9 +120,13 @@ library(foreach)
 # for plotting
 library(colorspace)
 library(ggplot2)
+library(ggdark)
 library(maps)
 library(patchwork)
+library(basetheme)
 
+# set dark mode plotting background 
+basetheme("deepblue")
 ```
 
 In this tutorial we want to build a BVAR - a bayesian version of Vector Autoregression models, since we deal with spatiotemporal data, which is quite large and can bring ordinary VARs to their limits. The problem with VARs in this case, is that not all parameters (a lot of different time series + lagged influences) can be estimated consistently. Therefore the bayesian approach focuses on constraining the model coefficients in a meaningful way through the use of priors. 
@@ -450,14 +484,14 @@ for(i in 1:100){
   acf_list[[i]] = acf(y.sim_list[[i]][,1],plot = F)
 }
 par(mfrow = c(1,1))
-plot(EOF.Salinity$time,y.sim_list[[1]][,1],col = "gray50",type = "l",ylab = "",xlab = "time",
+plot(EOF.Salinity$time,y.sim_list[[1]][,1],col = "gray30",type = "l",ylab = "",xlab = "time",
      ylim = range(y.sim_list[[1]][,1])*1.5)
 title("Comparison of obs. vs. sim. time series",adj = 0)
 for(i in 1:100){
-  lines(EOF.Salinity$time,y.sim_list[[i]][,1],col = "gray70")  
+  lines(EOF.Salinity$time,y.sim_list[[i]][,1],col = "gray30")  
 }
-lines(EOF.Salinity$time,y.trend.rm[,1],col = "black",lwd = 1.7)
-legend("topleft",c("observed","simulated"),col = c("black","gray70"),bty = "n",lwd = 2)
+lines(EOF.Salinity$time,y.trend.rm[,1],col = "navajowhite1",lwd = 1.7)
+legend("topleft",c("observed","simulated"),col = c("navajowhite1","gray30"),bty = "n",lwd = 2)
 # check acf
 acfs = do.call(cbind,lapply(acf_list,function(x) x$acf))
 acfs_melt = melt(acfs)
@@ -476,13 +510,13 @@ ggplot(acfs_quant) +
   geom_point(data = data.frame(mean = acf(y.trend.rm[,1],plot = F)$acf,Var1 = 0:30),
              aes(x = Var1,y = mean,col = "observed")) +
   geom_segment(data = data.frame(mean = acf(y.trend.rm[,1],plot = F)$acf,Var1 = 0:30),
-               aes(x = Var1,xend = Var1,y = mean,yend = 0),col = "black") + 
-  scale_colour_manual(values = c("black","red")) +
+               aes(x = Var1,xend = Var1,y = mean,yend = 0),col = "gray") + 
+  scale_colour_manual(values = c("gray","red")) +
   xlab("lag") + 
   ylab("ACF") + 
   ggtitle("ACF observed vs. simulated") + 
   guides(colour = guide_legend(title="ACF")) + 
-  theme_bw() # looks ok for this acf
+  dark_theme_gray() # looks ok for this acf
 
 
 # add the trend back on
@@ -539,9 +573,9 @@ for(kk in 1:nrow(lut)){
     geom_segment(aes(x = lag,xend = lag,y = mean,yend = 0),col = "red") + 
     geom_point(aes(x = lag,y = mean),col = "red") + 
     geom_point(data = df.ccf.obs,
-               aes(x = lag,y = ccf),col = "black") +
+               aes(x = lag,y = ccf),col = "gray") +
     geom_segment(data = df.ccf.obs,
-                 aes(x = lag,xend = lag,y = ccf,yend = 0),col = "black") + 
+                 aes(x = lag,xend = lag,y = ccf,yend = 0),col = "gray") + 
     geom_line(data = df.ccf.obs,
               aes(x = lag,y = lower),col = "black",linetype = "dashed") + 
     geom_line(data = df.ccf.obs,
@@ -550,7 +584,7 @@ for(kk in 1:nrow(lut)){
     xlab("lag") + 
     ylab("CCF") + 
     ggtitle(paste("CCF",paste(PC.names[c(lut[kk,1],lut[kk,2])],collapse = "-"))) + 
-    theme_bw() # looks ok for this acf
+    dark_theme_gray() # looks ok for this acf
   n = n+1
   
   # check the cross-spectral density
@@ -586,14 +620,14 @@ for(kk in 1:nrow(lut)){
     geom_point(data = cpsd.obs,
                aes(x = freq,y = cross,col = "observed")) +
     geom_smooth(data = cpsd.obs,linetype = "dashed",se = F,method = "gam",formula = y ~ s(x, bs = "cs"),
-                aes(x = freq,y = cross),col = "black") +
+                aes(x = freq,y = cross),col = "gray") +
     geom_line(data = cpsd.obs,
-              aes(x = freq,y = cross),col = "black") +
-    scale_colour_manual(values = c("black","red")) +
+              aes(x = freq,y = cross),col = "gray") +
+    scale_colour_manual(values = c("gray","red")) +
     xlab("freq") + 
     ylab("CPSD") + 
     ggtitle(paste("CPSD",paste(PC.names[c(lut[kk,1],lut[kk,2])],collapse = "-"))) + 
-    theme_bw() + 
+    dark_theme_gray() + 
     guides(colour = guide_legend(title="Data type"))
   n = n+1
 }
@@ -671,11 +705,13 @@ for(i in 1:10){
   
   
   image(EOF.Salinity$raster[[i]],col = col.dat,las = 1)
-  maps::map(add = T,fill = T,col = "gray80")
+  maps::map(add = T,fill = T,col = "gray80",
+            border = "gray50",lwd = 0.7)
   box()
   title(paste("Data",paste0("EOF",i),sep = "-"),adj = 0)
   image(EOF.Salinity_sim$raster[[i]]*flip,col = col.sim,las = 1)
-  maps::map(add = T,fill = T,col = "gray80")
+  maps::map(add = T,fill = T,col = "gray80",
+            border = "gray50",lwd = 0.7)
   box()
   title(paste("Sim",paste0("EOF",i),sep = "-"),adj = 0)
   
@@ -794,10 +830,12 @@ for(i in 1:5){
   }
   
   image(EOF.SST$raster[[i]],col = col.dat)
-  maps::map(add = T)
+  maps::map(add = T,fill = T,col = "gray80",
+            border = "gray50",lwd = 0.7)
   title(paste("Data",paste0("EOF",i),sep = "-"),adj = 0)
   image(EOF.SST_sim$raster[[i]]*flip,col = col.sim)
-  maps::map(add = T)
+  maps::map(add = T,fill = T,col = "gray80",
+            border = "gray50",lwd = 0.7)
   title(paste("Sim",paste0("EOF",i),sep = "-"),adj = 0)
   
    # plot PCs
@@ -915,11 +953,13 @@ for(i in 1:10){
   
   image(sqrt(EOF.currents$raster[[1]][[i]]^2 + EOF.currents$raster[[2]][[i]]^2),col = col.dat)
   # vectorField(v = v[,3],u = u[,3],xpos = v$x,ypos  =v$y,headspan = 0.03,scale = 0.2)
-  maps::map(add = T)
+  maps::map(add = T,fill = T,col = "gray80",
+            border = "gray50",lwd = 0.7)
   title(paste("Data",paste0("EOF",i),sep = "-"),adj = 0)
   image(sqrt(EOF.currents_sim$raster[[1]][[i]]^2 + EOF.currents_sim$raster[[2]][[i]]^2),col = col.sim)
   # vectorField(v = v.sim[,3],u = u.sim[,3],xpos = v.sim$x,ypos  =v.sim$y,headspan = 0.03,scale = 0.2)
-  maps::map(add = T)
+  maps::map(add = T,fill = T,col = "gray80",
+            border = "gray50",lwd = 0.7)
   title(paste("Sim",paste0("EOF",i),sep = "-"),adj = 0)
   
    # plot PCs
@@ -1377,24 +1417,24 @@ BVAR_wrapper_sims = sim.spatial.BVAR(BVAR.fit = BVAR_wrapper_fit,
 par(mfrow = c(1,3))
 plot(cellStats(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,mean),type = "l",xlab ="",ylab = "")
 for(i in 1:10){
-  lines(cellStats(brick(BVAR_wrapper_sims$sims$Salinity[[i]]),mean),col = "gray50")
+  lines(cellStats(brick(BVAR_wrapper_sims$sims$Salinity[[i]]),mean),col = "gray30")
 }
-lines(cellStats(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,mean),col = "black")
+lines(cellStats(POLCOM_ERSEM_Salinity_raster_meanBiasRM_anom$rcp45,mean),col = "navajowhite1")
 title("Salinity anom.",adj = 0)
 
 plot(cellStats(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,mean),
      type = "l",xlab = "",ylab = "")
 for(i in 1:10){
-  lines(cellStats(brick(BVAR_wrapper_sims$sims$SST[[i]]),mean),col = "gray50")
+  lines(cellStats(brick(BVAR_wrapper_sims$sims$SST[[i]]),mean),col = "gray30")
 }
-lines(cellStats(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,mean),col = "black")
+lines(cellStats(POLCOM_ERSEM_SST_raster_meanBiasRM_anom$rcp45,mean),col = "navajowhite1")
 title("SST anom.",adj = 0)
 plot(cellStats(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u,mean),
      type = "l",xlab ="",ylab = "")
 for(i in 1:10){
-  lines(cellStats(brick(BVAR_wrapper_sims$sims$Currents[[i]][[1]]),mean),col = "gray50")
+  lines(cellStats(brick(BVAR_wrapper_sims$sims$Currents[[i]][[1]]),mean),col = "gray30")
 }
-lines(cellStats(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u,mean),col = "black")
+lines(cellStats(POLCOM_ERSEM_Currents_raster_meanBiasRM_anom$rcp45$u,mean),col = "navajowhite1")
 title("Currents-u anom.",adj = 0)
 ```
 
