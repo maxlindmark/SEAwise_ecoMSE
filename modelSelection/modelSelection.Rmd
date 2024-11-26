@@ -70,7 +70,7 @@ Some general criteria for model selection:
 
 We will generate synthetic data for the following examples, both for simplicity and to gain insight into the model selection process, as we will know the "true" underlying relationship.
 
-The example will be to fit an environmentally-mediated stock-recruitment relationship (EMSRR), using a modified Ricker [e.g. "controlling"-type as described by @levi_embedding_2003]:
+The example will be to fit an environmentally-mediated stock-recruitment relationship (EMSRR), using a modified Ricker [e.g. "controlling"-type as described by @levi_embedding_2003; @iles_stock_1998]:
 
 -   *Ricker*: $R = \alpha SSBe^{−\beta SSB}$ ; $log(R) = log(\alpha) + log(SSB) – \beta SSB$
 -   *Ricker wih env.* : $R = \alpha SSBe^{−\beta SSB} e^{cE}$ ; $log(R) = log(\alpha) + log(SSB) – \beta SSB + cE$
@@ -213,8 +213,15 @@ fit <- step(fit0,
 )
 
 summary(fit)
-c(fit0=AIC(fit0), fit=AIC(fit)) # comparison of AIC
+
+# comparison of AIC & R2
+df <- data.frame(AIC=c(AIC(fit0), AIC(fit)),
+  R2 = c(1 - fit0$deviance/fit0$null.deviance, 
+    1 - fit$deviance/fit$null.deviance), 
+  row.names = c("fit0", "fit"))
+print(df)
 ```
+
 
 ## Dredging
 
@@ -300,7 +307,7 @@ rmse <- function(y, yhat){sqrt(mean((y - yhat)^2, na.rm = TRUE))}
 # Mean Absolute Percentage Error (MAPE)
 mape <- function(y, yhat){mean(abs(y - yhat) / y, na.rm = TRUE)}
 
-# Median Absolute Percentage Error (MAPE)
+# Median Absolute Percentage Error (MdAPE)
 mdape <- function(y, yhat){median(abs(y - yhat) / y, na.rm = TRUE)}
 
 # Mean Absolute Error (MAE)
@@ -1065,8 +1072,8 @@ for(i in c(0,seq(nPeel))){
   datTrain.i$forecast[length(datTrain.i$forecast)] <- 0
   
   if(i>0){
-  datTest.i$type <- "Test"
-  datTest.i$forecast <- seq(nrow(datTest.i))
+    datTest.i$type <- "Test"
+    datTest.i$forecast <- seq(nrow(datTest.i))
   }
   
   datPred <- rbind(datTrain.i, datTest.i)
