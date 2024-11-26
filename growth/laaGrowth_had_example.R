@@ -63,4 +63,8 @@ i=which.min(tmp2)
 (formLinf = as.formula(forms[[mod=grid[i, "f"]]]))
 (mod = mods[grid[i, "m"]])
 
-
+## AICc table--------------
+grid = transform(grid, form=as.character(forms[f]), 
+               mod=mods[m],
+               deltaAIC = AICc-grid$AICc[i])
+grid[order(grid$AICc),]
