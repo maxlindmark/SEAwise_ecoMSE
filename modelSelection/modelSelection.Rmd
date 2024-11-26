@@ -1148,7 +1148,7 @@ print(p)
 
 # Concluding remarks
 
-For some SEAwise participants, these results illustrate important considerations for the use of environmentally-mediated models in management strategy evaluations:
+During the SEAwise project, similar results on the predictive power of environmentally-mediated models illustrated important considerations and trade-offs for their use in management strategy evaluations:
 
 -   Their use in the **management procedure**, e.g. as part of a harvest control rule involving short-term forecasts, requires rigorous testing with realistic information on future environmental conditions. Clear benefits over naive approaches may be rare.
 -   Their use in the **operating model**, e.g. as part of the biological dynamics, can provide important tests to the robustness of a given management procedure over the long-term. The ability of a given harvest control rule to produce favorable outcomes across several alternate (likely) operating models provides additional confidence in the procedure.
