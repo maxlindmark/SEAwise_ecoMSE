@@ -68,3 +68,18 @@ grid = transform(grid, form=as.character(forms[f]),
                mod=mods[m],
                deltaAIC = AICc-grid$AICc[i])
 grid[order(grid$AICc),]
+
+## Predict from the best model---------
+gFit = fitlaa(dat.train=dat, formLinf = formLinf, mod = mod)
+
+#make predictions back on the observed data
+dat$predl2=predlaa(gFit, newdata = dat)
+
+## transform back to w ---------
+dat$predw2 = (LWab$a * dat$predl2 ^ LWab$b)/1000
+
+ggplot(dat, aes(x=age, colour=as.factor(cohort)))+
+  geom_point(aes(y=w2))+
+  geom_line(aes(y=predw2), alpha=0.25)+
+  guides(colour=guide_legend(title="Cohort"))+
+  ylab("weight")
