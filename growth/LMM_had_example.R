@@ -68,7 +68,7 @@ newdata$cohortf = NA #omit RE to get mean predictions
 newdata$yearf = NA #omit RE to get mean predictions
 
 newdata$predlogw2 = predict(gFit, newdata = newdata, allow.new.levels=TRUE) # predict size2
-tot.var = as.numeric(VarCorr(gFit)$cond$cohortf+VarCorr(gFit)$cond$yearf+attr(VarCorr(gFit)$cond,"sc")^2)
+tot.var = as.numeric(VarCorr(gFit)$cond$cohortf + VarCorr(gFit)$cond$yearf + attr(VarCorr(gFit)$cond,"sc")^2)
 #predict on real scale with all 3 variance components included
 newdata$predw2 = exp(newdata$predlogw2 + tot.var/2) #lognormal mean
 
