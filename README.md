@@ -80,7 +80,9 @@ install.packages(c(
 
 ### 02. practical on model fitting to recruitment
 ```R
+
 install.packages(c("modelr","nlstools","MuMIn","rlist","formula.tools","corrplot"))
+
 ```
 
 ### 03. practical on model selection
@@ -152,6 +154,112 @@ plot(sas) # Plots general stock assessment output
 ```
 
 This is a fairly simple model that runs without any climatic or other external data, but works as a baseline assessment model. 
+
+
+###  0.2 Practical on MSEs with BEMTOOL
+
+from zip: ALADYMTools
+
+from Cran:gridExtra, akima, stringr, Hmisc, timeDate,reshape, scales, FLBRP
+
+from http://flr-project.org/R: FLCore, ggplot2, FLasher
+
+
+
+```R
+if (!("iterators" %in% installed.packages()[,1])) {
+    install.packages("iterators")
+}
+
+if (!("FLCore" %in% installed.packages()[,1])) {
+    #install.packages("FLCore",repos="http://flr-project.org/R")
+  remotes::install_github("flr/FLCore")
+}
+
+if (!("ggplot2" %in% installed.packages()[,1])) {
+    install.packages("ggplot2")
+}
+
+if (!("gridExtra" %in% installed.packages()[,1])) {
+    install.packages("gridExtra")
+}
+
+if (!("akima" %in% installed.packages()[,1])) {
+    install.packages("akima")
+}
+
+if (!("stringr" %in% installed.packages()[,1])) {
+    install.packages("stringr")
+}
+
+if (!("RGtk2" %in% installed.packages()[,1])) {
+    install.packages("RGtk2")
+}
+
+
+if (!("Hmisc" %in% installed.packages()[,1])) {
+    install.packages("Hmisc")
+}
+
+if (!("timeDate" %in% installed.packages()[,1])) {
+    install.packages("timeDate")
+}
+
+if (!("reshape" %in% installed.packages()[,1])) {
+    install.packages("reshape")
+}
+
+if (!("scales" %in% installed.packages()[,1])) {
+    install.packages("scales")
+}
+
+if (!("tryCatchLog" %in% installed.packages()[,1])) {
+    install.packages("tryCatchLog")
+}
+
+if (!("FLasher" %in% installed.packages()[,1])) {
+    install.packages("FLasher",repos="http://flr-project.org/R")
+}
+
+if (!("FLBRP" %in% installed.packages()[,1])) {
+   # install.packages("FLBRP",repos="http://flr-project.org/R")
+    remotes::install_github("flr/FLBRP")
+}
+
+if (!("FLasher" %in% installed.packages()[,1])) {
+   # install.packages("FLBRP",repos="http://flr-project.org/R")
+    remotes::install_github("flr/FLasher")
+}
+
+
+```
+RGtk2 installation
+
+A specific procedure has to be carried out to install RGtk2:
+
+1.	Download GTK+ dependencies (gtk+-bundle_2.22.1-20101229_win64.zip file) from https://download.gnome.org/binaries/win64/gtk+/2.22/
+
+2.	Unzip it to the path of your choice.
+
+3.	Set the environment variable PATH to where GTK+ was unzipped. You could use this command from within R:
+
+    Sys.setenv(PATH = "Path\\to\\gtk+")
+    example: Sys.setenv(PATH = "C:\\Users\\Utente\\training")
+
+4.	Install RGtk2 from Togaware:
+    install.packages("https://access.togaware.com/RGtk2_2.20.36.2.zip", repos=NULL)
+    
+    or from Github:
+    
+    devtools::install_github("cran/RGtk2") 
+
+5.	 Import the library:
+    library(RGtk2)
+6.	A dialog window may appear asking you to intall GTK+. This should install some missing parts of the GTK+ or refer RGtk2 of the GTK+ installed in step 1.
+
+7.	Restart R.
+
+
 
 ### 03. practical on MSEs with FLBEIA
 
