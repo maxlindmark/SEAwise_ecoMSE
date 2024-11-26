@@ -378,8 +378,7 @@ distribution of each species in the study area:</p>
 <ul>
 <li>European hake: 50-500 m;</li>
 <li>red mullet: 0-200 m;</li>
-<li>deep-water rose shrimp:</li>
-<li>50-500 m;</li>
+<li>deep-water rose shrimp:50-500 m;</li>
 <li>red shrimps: 200-800 m</li>
 </ul>
 <p>and grouped in GSAs based on the stock unit considered. Monthly
@@ -449,7 +448,7 @@ head(env_hindcast)</code></pre>
 relationships at a glance.Our objective in this case is to avoid
 including correlated variables in the model fitting process to minimize
 redundancy and reduce the risk of spurious relationships. For European
-hake in the Western Ionian SEa, we observe that sea surface temperature
+hake in the Western Ionian Sea, we observe that sea surface temperature
 (SST) is highly correlated with bottom temperature, and bottom salinity
 is correlated with all variables except nppv. Therefore, we will explore
 models that include one of the correlated variables at a time to ensure
@@ -459,9 +458,7 @@ y=data[,c(1)]
 R=as.numeric(data[,c(2)])
 S=as.numeric(data[,c(3)])
 
-# 
-#env_hindcast=env_hindcast[env_hindcast$YEAR&gt;=y[1] &amp; env_hindcast$YEAR&lt;=y[length(y)],]
-# 
+ 
 
 botT&lt;-env_hindcast$botT
 sst &lt;-env_hindcast$sst
@@ -928,9 +925,9 @@ Ricker and hockey stick were also explored in SEAwise.</p>
 <p>Using the presented approach it is possible to explore any SRR model
 just adapting the script. It would be also possible to adapt the scipt
 to fit EMSRR applying a model error approach (in case a robust and
-contrasted dataset is available).</p>
-<p>More complex indicators can be introduced following Marc presentation
-on model selection.</p>
+contrasted data set is available).</p>
+<p>More complex model performance indicators can be introduced following
+Marc presentation on model selection.</p>
 </div>
 
 

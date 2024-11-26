@@ -80,7 +80,7 @@ case="HKE19"
 # Exploring correlations among covariates
 
 Correlation plots provide a quick, intuitive way to assess relationships at a glance.Our objective in this case is to avoid including correlated variables in the model fitting process to minimize redundancy and reduce the risk of spurious relationships. 
-For European hake in the Western Ionian SEa, we observe that sea surface temperature (SST) is highly correlated with bottom temperature, and bottom salinity is correlated with all variables except nppv. Therefore, we will explore models that include one of the correlated variables at a time to ensure a more robust analysis.
+For European hake in the Western Ionian Sea, we observe that sea surface temperature (SST) is highly correlated with bottom temperature, and bottom salinity is correlated with all variables except nppv. Therefore, we will explore models that include one of the correlated variables at a time to ensure a more robust analysis.
 
 ```{r correlation, echo=TRUE, warning = FALSE, message = FALSE}
 
