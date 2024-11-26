@@ -112,7 +112,7 @@ run.sms.MSE <- function(df.tmb,
     age = df.tmb$age,
     nage = length(df.tmb$age),
     F0 = mtrx$Fin,
-    sel = mtrx$Fsel,
+    Fsel = mtrx$Fsel,
     M = mtrx$M,
     mat = mtrx$mat,
     weca = mtrx$weca,
@@ -144,6 +144,7 @@ run.sms.MSE <- function(df.tmb,
   tmp <-run.agebased.sms.op(df.OM)
 
   Fmsy <- df.tmb$Fmsy
+
 
 
   if(df.tmb$recmodel == 3){
@@ -181,8 +182,9 @@ run.sms.MSE <- function(df.tmb,
         }
 
 
-        #if(shortCut == FALSE){
         parms.mse <- getParms(df.assess) # Get new parameter sizes
+
+        # if(shortut == FALSE){
 
         assess<- runAssessment(df.assess, parms.mse)
 
@@ -195,6 +197,15 @@ run.sms.MSE <- function(df.tmb,
           badmodel <- 0
         }
 
+        # }else{
+        #   if(yr == 1){
+        #   assess <- sas
+        #   else{
+        #
+        #   # Add some studf
+        #   assess$reps$values
+        #   }
+        # }
         # #
         # }
         nyear <- length(df.mse$years)
@@ -272,6 +283,9 @@ run.sms.MSE <- function(df.tmb,
         }
 
         if(HCR == 'Fmsy_ext'){
+
+            if(is.null(Fmsy))stop('Supply Fmsy in the df')
+
             fcast <- getTAC(df.assess,
                             assess,
                             recruitment = 'mean',
@@ -296,7 +310,7 @@ run.sms.MSE <- function(df.tmb,
           age = ages,
           nage = length(ages),
           F0 = Fnew,
-          sel = mtrx.new$Fsel,
+          Fsel = mtrx.new$Fsel,
           M = mtrx.new$M,
           mat = mtrx.new$mat,
           weca = mtrx.new$weca,
