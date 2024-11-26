@@ -1,0 +1,263 @@
+---
+title: "Practical on BEMTOOL application on GSA171819"
+author: "Bitetto Isabella - COISPA"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+BEMTOOL is a bio-economic multi-fleet and multiple species (no interaction) simulation model used in many working group in Mediterranean Sea and in many EU funded projects to provide an evaluation of the impact of a range of management measures from a biological and economic point of view.
+More details can be found in Rossetto et al. (2015), Russo, Bitetto et al, 2017 and on STECF reports on Western Mediterranean MAP (last one: https://stecf.ec.europa.eu/meetings-calendar/meetings-past-future/ewg-24-12-fishing-effort-regime-demersal-fisheries-west-med-2024-09-30_en).
+ALADYM model represents the biological and pressure componenet of BEMTOOL (Lembo et al., 2009). It is distributed as a package (.zip)
+
+In SEAwise project the climate change impact was integrated in BEMTOOL through the EMSRR.
+
+
+## Required packages to run this tutorial
+
+In order to execute the code in this tutorial you should have the following packages installed:
+
+from zip: ALADYMTools
+
+from Cran:gridExtra, akima, stringr, Hmisc, timeDate,reshape, scales, FLBRP
+
+from http://flr-project.org/R: FLCore, ggplot2, FLasher
+
+```{r packages, echo=TRUE, warning = FALSE, message = FALSE,results=FALSE}
+# iterators
+if (!("iterators" %in% installed.packages()[,1])) {
+    install.packages("iterators")
+}
+
+
+if (!("FLCore" %in% installed.packages()[,1])) {
+    #install.packages("FLCore",repos="http://flr-project.org/R")
+  remotes::install_github("flr/FLCore")
+}
+
+if (!("ggplot2" %in% installed.packages()[,1])) {
+    install.packages("ggplot2")
+}
+
+if (!("gridExtra" %in% installed.packages()[,1])) {
+    install.packages("gridExtra")
+}
+
+if (!("akima" %in% installed.packages()[,1])) {
+    install.packages("akima")
+}
+
+if (!("stringr" %in% installed.packages()[,1])) {
+    install.packages("stringr")
+}
+
+if (!("RGtk2" %in% installed.packages()[,1])) {
+    install.packages("RGtk2")
+}
+
+
+if (!("Hmisc" %in% installed.packages()[,1])) {
+    install.packages("Hmisc")
+}
+
+if (!("timeDate" %in% installed.packages()[,1])) {
+    install.packages("timeDate")
+}
+
+if (!("reshape" %in% installed.packages()[,1])) {
+    install.packages("reshape")
+}
+
+if (!("scales" %in% installed.packages()[,1])) {
+    install.packages("scales")
+}
+
+if (!("tryCatchLog" %in% installed.packages()[,1])) {
+    install.packages("tryCatchLog")
+}
+
+if (!("FLasher" %in% installed.packages()[,1])) {
+    install.packages("FLasher",repos="http://flr-project.org/R")
+}
+
+if (!("FLBRP" %in% installed.packages()[,1])) {
+   # install.packages("FLBRP",repos="http://flr-project.org/R")
+    remotes::install_github("flr/FLBRP")
+}
+
+if (!("FLasher" %in% installed.packages()[,1])) {
+   # install.packages("FLBRP",repos="http://flr-project.org/R")
+    remotes::install_github("flr/FLasher")
+}
+
+
+```
+
+## RGtk2 installation
+
+A specific procedure has to be carried out to install RGtk2:
+
+1.	Download GTK+ dependencies (gtk+-bundle_2.22.1-20101229_win64.zip file) from https://download.gnome.org/binaries/win64/gtk+/2.22/ 
+2.	Unzip it to the path of your choice.
+
+ATTENTION!!!!: Using either Windows Explorer's built-in zip file management, or the command-line unzip.exe, available for instance at
+ftp://tug.ctan.org/tex-archive/tools/zip/info-zip/WIN32/unz552xN.exe unzip this bundle. Avoid Winzip! It is known to behave oddly.
+
+3.	Set the environment variable PATH to where GTK+ was unzipped. You could use this command from within R:
+
+Sys.setenv(PATH = "Path\\to\\gtk+")
+
+4.	Install RGtk2 from Togaware:
+
+install.packages("https://access.togaware.com/RGtk2_2.20.36.2.zip", repos=NULL)
+or from Github:
+
+devtools::install_github("cran/RGtk2") 
+
+5.	 Import the library:
+library(RGtk2)
+
+6.	A dialog window may appear asking you to intall GTK+. This should install some missing parts of the GTK+ or refer RGtk2 of the GTK+ installed in step 1.
+
+7.	Restart R.
+
+8.	Import the library again
+
+
+```{r RGtk2 installation, echo=TRUE, warning = FALSE, message = FALSE}
+
+# TO DO just the FIRST time you run BEMTOOL!
+
+#wd <- "C:\\corso SEAwise\\gtk+-bundle_2.22.1-20101229_win64"
+#setwd(wd)
+
+# Sys.setenv(PATH = "C:\\Training\\gtk+-bundle_2.22.1-20101229_win64")
+
+#install.packages("https://access.togaware.com/RGtk2_2.20.36.2.zip", repos=NULL)
+
+library(RGtk2)
+library(ALADYMTools)
+
+```
+
+# Launching the model
+
+
+```{r BEMTOOL run, echo=TRUE, warning = FALSE, message = FALSE}
+wd <- "C:\\Training\\BMT_Nov2024"
+
+setwd(wd)
+
+source("BEMTOOL.r")
+
+# activate_main_w()
+```
+
+# Running the simulation part from the GUI
+
+Pay attention to copy on C disk the folder Training as it is.
+
+1. When BEMTOOL GUI will appears, click on "LOAD case study definition" button and select the file "INPUT/bmtconfigSimulation.csv"; 
+
+2. Click on NEXT button and verify that all the data (biological, economic, etc...) are correctly read; click 3 times on NEXT and finally click on "RUN new diagnosis";
+
+3. When the ALADYM GUI appears, click on "Load simulation parameters" and select the file "ALADYM/configuration file_ALADYM -HKE GSA 17-18.csv" and then click on RUN simulation.
+
+4. In the console you can see the steps of running the reference points for stock 1; when it finiishes, the ALADYM GUI for the second stock (hake 19) will appear. Redo the step 3, selecting in the following order these files: 
+
+   + ALADYM/configuration file_ALADYM -HKE GSA 19.csv;
+   + ALADYM/configuration file_ALADYM -MUT GSA 17-18.csv;
+   + ALADYM/configuration file_ALADYM -MUT GSA 19.csv;
+   + ALADYM/configuration file_ALADYM -DPS GSA 171819.csv.
+   
+Once that the diagnosis was loaded, click on "Load scenario configuration" and select the file bmtconfigForecast.csv. It is set a SQ scenario.
+
+Before clicking on Run NEW scenario, select the grid for environmental projections for the years of simulations (in our case until 2040).
+Open the script "runCI.r" in the folder "C:\Training\BMT_Nov2024\src\biol\bmtALADYM\ALADYM-ver12.3-2017_0501\src" (lines 628-650)
+
+This modification of the files will change according to the climate change scenario.
+
+```{r modify the RCP scenario, echo=TRUE, warning = FALSE, message = FALSE}
+
+# DO IT in the script, here it is reported only an example!
+
+#Folder: "C:\Training\BMT_Nov2024\src\biol\bmtALADYM\ALADYM-ver12.3-2017_0501\src"
+
+
+BMT_SPECIES= c("M.mer1718" ,  "M.mer19"    , "M.bar1718"   ,"M.bar19"   ,  "P.lon171819")
+ALADYM_spe=1
+
+if(BMT_SPECIES[ALADYM_spe]=="M.mer1718" ){
+  
+  ENV<<-read.table("C:\\Training\\INPUT\\ENVIRONMENTAL_GRIDS\\HKE1718_50_500_NoCC_bia_adj_month.csv",sep=";",header=T)  
+  
+} else if (BMT_SPECIES[ALADYM_spe]=="M.mer19" ){
+  ENV<<-read.table("C:\\Training\\INPUT\\ENVIRONMENTAL_GRIDS\\HKE19_50_500_NoCC_bia_adj_month_2.csv",sep=";",header=T)  
+  
+} else if (BMT_SPECIES[ALADYM_spe]=="M.bar1718" ){
+  ENV<<-read.table("C:\\Training\\INPUT\\ENVIRONMENTAL_GRIDS\\MUT1718_10-200_NoCC_bia_adj_month.csv",sep=";",header=T)  
+  
+} else if (BMT_SPECIES[ALADYM_spe]=="M.bar19" ){
+  ENV<<-read.table("C:\\Training\\INPUT\\ENVIRONMENTAL_GRIDS\\MUT19_10_200_NoCC_bia_adj_month.csv",sep=";",header=T)  
+  
+} else if (BMT_SPECIES[ALADYM_spe]=="P.lon171819" ){
+  ENV<<-read.table("C:\\Training\\INPUT\\ENVIRONMENTAL_GRIDS\\DPS17181920_50_500_NoCC_bia_adj_month.csv",sep=";",header=T)  
+}
+
+head(ENV)
+
+```
+
+This table could potentially contain different values for each month in the year.
+
+# Modify RFSS script with the coefficients of the EMSRR
+
+In the function containing the equations of the SRR, we included all the coefficients by stock except a and b.
+
+Folder: "C:\Training\BMT_Nov2024\src\biol\bmtALADYM\ALADYM-ver12.3-2017_0501\src"
+
+These coefficients will not change with the climate change scenario.
+
+```{r modify the RFSS script, echo=TRUE, warning = FALSE, message = FALSE}
+# DO IT in the script!! Here there is only an example!
+
+# Folder: "C:\Training\BMT_Nov2024\src\biol\bmtALADYM\ALADYM-ver12.3-2017_0501\src"
+
+
+
+if(BMT_SPECIES[ALADYM_spe]=="M.mer1718" ){
+para_RLc=0.123  # HKE 1718
+para_RLd=0  # HKE 1718
+} else if (BMT_SPECIES[ALADYM_spe]=="M.mer19"){
+para_RLc=0.244      # HKE19
+para_RLd= 0     # HKE19
+} else if (BMT_SPECIES[ALADYM_spe]=="M.bar1718"){
+para_RLc=0.395      # mut1718
+para_RLd=  0.014    # mut1718
+} else if (BMT_SPECIES[ALADYM_spe]=="M.bar19"){
+para_RLc=0.546      # mut19
+para_RLd=  0   # mut19
+} else if (BMT_SPECIES[ALADYM_spe]=="P.lon171819"){
+para_RLc=0      # dps
+para_RLd=  -0.424   # dps
+} 
+
+```
+
+# Running the climate change scenarios
+
+Come back to the BEMTOOL GUI and, clicking on "Load scenario configuration" button, you can select the file "INPUT/bmtconfigForecast.csv".
+
+In the GUI can verify if the input data are correctly read, and you can modify the name of the scenario according to the setting defined in the chunk "modify the RCP scenario".
+
+
+In the OUTPUT folder you will find all your saved results, in tables (.csv) and plots.
+
+
+
+
+
