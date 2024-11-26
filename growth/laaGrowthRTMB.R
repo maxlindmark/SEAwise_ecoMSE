@@ -135,9 +135,13 @@ predlaa = function(object, newdata, std.err=FALSE) {
   mapArg$bcohort = factor(rep(NA,length(newParameters$bcohort)))
   mapArg$byear = factor(rep(NA,length(newParameters$byear)))
   
-  #  newObj = RTMB::MakeADFun(cmb(nll, augdata, formLinf, mod), newParameters, random=c("bcohort", "byear"), 
-  #                            map = mapArg)
-  newObj = RTMB::MakeADFun(cmb(nll, augdata, formLinf, mod), newParameters, random=c("bcohort", "byear"))
+  if(mod != "gvbgf"){
+    newObj = RTMB::MakeADFun(cmb(nll, augdata, formLinf, mod), 
+                             newParameters, random=c("bcohort", "byear"), map = list(logD=factor(NA)))
+  }else{
+    newObj = RTMB::MakeADFun(cmb(nll, augdata, formLinf, mod), 
+                             newParameters, random=c("bcohort", "byear"))
+  }
   
   newObj$fn(oldPar)  ## call once to update internal structures
   
