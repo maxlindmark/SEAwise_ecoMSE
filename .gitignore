@@ -62,5 +62,9 @@ rsconnect/
 # do not sinc data folder
 data/
 
+# do not model & functions folder in FLBEIA_MSE, but download from figshare
+/FLBEIA_MSE/model/
+/FLBEIA_MSE/functions/
+
 # do not sink html files
 *.html
