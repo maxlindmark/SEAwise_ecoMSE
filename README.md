@@ -265,8 +265,8 @@ A specific procedure has to be carried out to install RGtk2:
 
 - from CRAN:
 ```R
-install.packages( c("plyr","stringr","reshape2","glmmTMB",
-                    "earth","ggplot2","patchwork"))
+install.packages( c("plyr","stringr","reshape2","glmmTMB","cobs",
+                    "earth","ggplot2","ggdark","basetheme","patchwork"))
 ```
 - from FLR:
 ```R
