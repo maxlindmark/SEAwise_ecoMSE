@@ -1,15 +1,14 @@
 ---
-title: "Look at env. effects on reference points"
+title: "Environmental effects on reference points"
 author: "Bernhard Kühn & Marc Taylor - Thünen SF"
 date: "`r Sys.Date()`"
 output:
   cleanrmd::html_document_clean:
     toc: true
-    fig.witdh: 12
     mathjax: default
     use_fontawesome: true
-    theme: water
-    highlight: "pygments"
+    theme: water-dark
+    highlight: "breezedark"
     df_print: paged
     self_contained: true
 ---
@@ -18,39 +17,54 @@ output:
 knitr::opts_chunk$set(echo = TRUE,size = "small")
 ```
 
-## Introduction
+```{css, echo=FALSE}
+p {
+ font-size: 18px;
+ width: 800px;
+ max-width: 1100px;
+}
+h1 {
+  width: 800px;
+}
+h2 {
+  width: 800px;
+}
+div {
+  font-size: 16px;
+  width: 800px;
+  max-width: 1100px;
+}
+pre {
+  font-size: 16px;
+  width: 800px;
+  max-width: 1100px;
+}
+```
 
-Now that we have modeled environmental influences on recruitment and growth of a stock, we want to see how this might affect reference points in the future. Normally ICES does a
-benchmark approximately every 5 years to adapt the management to changes in the perception of the stock (e.g. changes in the productivity regime of the stock). With an explicit environmental influence resulting in a declining trend in productivity, reference points would likely change as well. This was not considered in our previous simulations, where we only simulated the stock forward with the current management routine in place. To get an idea how reference points might be affected we now set up a simulation, where we simulate harvesting under different target F combined with future periods of decreasing productivity. So we get a glimpse on how Fmsy and Btrigger might change in the 2030s, 2040s, 2050s under the respective climate change scenarios RCP4.5 and RCP8.5.
+## 1. Introduction
+
+Now that we have modeled environmental influences on recruitment and growth of a stock, we want to see how this might affect reference points in the future. Normally ICES does a benchmark approximately every 5 years to adapt the management to changes in the perception of the stock (e.g. changes in the productivity regime of the stock). With an explicit environmental influence resulting in a declining trend in productivity, reference points would likely change as well. This was not considered in our previous simulations, where we only simulated the stock forward with the current management routine in place. To get an idea how reference points might be affected we now set up a simulation, where we simulate harvesting under different target F combined with future periods of decreasing productivity. So we get a glimpse on how Fmsy and Btrigger might change in the 2030s, 2040s, 2050s under the respective climate change scenarios RCP4.5 and RCP8.5.
 
 **The goals of this tutorial:**
 
-- the use of MSEs for reference point estimation
-- see how reference points might be affected by climate change (RCP4.5 & RCP8.5)
+-   the use of MSEs for reference point estimation
+-   see how reference points might be affected by climate change (RCP4.5 & RCP8.5)
 
-## Required packages to run this tutorial
+## 2. R-setup
 
-In order to execute the code in this tutorial you should have the following packages
-installed:
+### 2.1 Required packages to run this tutorial
 
--   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/),
-    [earth](https://cran.r-project.org/web/packages/earth),
-    [plyr](https://cran.r-project.org/web/packages/plyr),
-    [stringr](https://cran.r-project.org/web/packages/stringr/),
-    [reshape2](https://cran.r-project.org/web/packages/reshape2/),
-    [ggplot2](https://cran.r-project.org/web/packages/ggplot2/),
-    [patchwork](https://cran.r-project.org/web/packages/patchwork/)
--   FLR: [FLCore](https://flr-project.org/FLCore/),
-    [FLFleet](https://flr-project.org/FLFleet/), [FLash](https://flr-project.org/FLash/),
-    [FLAssess](https://flr-project.org/FLAssess/),
-    [FLBEIA](https://flr-project.org/FLBEIA/)
+In order to execute the code in this tutorial you should have the following packages installed:
+
+-   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/), [earth](https://cran.r-project.org/web/packages/earth), [plyr](https://cran.r-project.org/web/packages/plyr), [stringr](https://cran.r-project.org/web/packages/stringr/), [reshape2](https://cran.r-project.org/web/packages/reshape2/), [ggplot2](https://cran.r-project.org/web/packages/ggplot2/), [ggdark](https://cran.r-project.org/web/packages/ggdark/), [patchwork](https://cran.r-project.org/web/packages/patchwork/)
+-   FLR: [FLCore](https://flr-project.org/FLCore/), [FLFleet](https://flr-project.org/FLFleet/), [FLash](https://flr-project.org/FLash/), [FLAssess](https://flr-project.org/FLAssess/), [FLBEIA](https://flr-project.org/FLBEIA/)
 
 ```{r Install packages,eval=FALSE}
 install.packages( c("FLCore", "FLFleet", "FLBEIA",
                     "FLash", "FLAssess"), 
                   repos="http://flr-project.org/R")
 install.packages( c("plyr","stringr","reshape2","glmmTMB",
-                    "ggplot2","patchwork"))
+                    "ggplot2","ggdark","patchwork"))
 
 ```
 
@@ -67,17 +81,49 @@ library(stringr)
 library(reshape2)
 library(earth)
 library(ggplot2)
+library(ggdark)
 library(patchwork)
 ```
 
-## Load/Create helper functions & lookup tables
+### 2.2 Download data
+
+The data for this tutorial can be downloaded directly from figshare.
+
+```{r Download input data, message = F}
+# automatically download input files for the tutorial from figshare
+
+# url for the data for the tutorial on "ways to summarise env data"
+url = "https://figshare.com/ndownloader/files/50834880?private_link=fc89683a94c1089ab4aa"
+
+# specify data to download
+fn <- "FLBEIA_MSE.zip" # 443mb
+# directory to store data (create data directory in the folder of each practical)
+fp <- "./"
+
+# (increase timeout for larger files)
+options(timeout = max(300, getOption("timeout")))
+# download only if the files do not exist yet
+dir.nms = list.dirs("./",recursive = F)
+if(!all(c("./data","./model","./functions") %in% dir.nms)){
+# download
+download.file(url = url,file.path(fp,fn),mode = "wb")
+# unzip
+unzip(file.path(fp,fn),exdir = fp)
+# remove original zip-download
+unlink(file.path(fp,fn))
+}
+```
+
+## 3. FLBEIA setup
+
+### 3.1 Load/Create helper functions & lookup tables
 
 ```{r Load functions, message=F,error=F,warning=F}
 # required functions ------------------------------------------------------
-source("../functions/nameChange.R")
+source("./functions/nameChange.R")
 
 # load EMSRR models -------------------------------------------------------
-emsrr.names =sapply(list.files("../data/EMSRRs/","*.RData|*.Rdata",
+emsrr.names =sapply(list.files("./data/EMSRRs/","*.RData|*.Rdata",
                                full.names = T),
        load,envir = .GlobalEnv)
 stk_nms = as.vector(gsub(".EMSRR.*","",emsrr.names)) 
@@ -87,27 +133,25 @@ emsrr_lut = data.frame(stk_long = stk_nms,
                        model.obj = emsrr.names)
 
 # load parameter uncertainty of EMSRRs ------------------------------------
-load("../data/EMSRR.models_boot.Rdata")
+load("./data/EMSRR.models_boot.Rdata")
 emsrr_stks = names(EMSRRs_boot)
 
 # load look-up table ------------------------------------------------------
 
-load(file = "../data/eqsim_lut.Rdata")
-load(file = "../data/lw_lut.Rdata")
+load(file = "./data/eqsim_lut.Rdata")
 ```
 
-## Define Global Setup
+### 3.2 Define Global Setup
 
-Here we just define the overall setup for the MSE: what Ftarget\`s to run, what biological
-parameters to vary or include, the periods for which we want to evaluate the ref-pt
-changes as well as the number of iterations. The aim is to run longterm simulations under
-varying F + a constant environmental forcing corresponding to the average of the chosen
-period (e.g. 2030s) until reaching equilibrium (\~2099) and take the equilibrium yield and
-SSB as a basis to see reference point changes.
+Here we just define the overall setup for the MSE: what Ftarget\`s to run, what biological parameters to vary or include, the periods for which we want to evaluate the ref-pt changes as well as the number of iterations.
+
+The aim is to run longterm simulations under varying F + a constant environmental forcing corresponding to the average of the chosen period (e.g. 2030s) until reaching equilibrium (\~2099) and take the equilibrium yield and SSB as a basis to see reference point changes.
 
 ```{r Global Setup, message = F, error=F,warning=F}
 # global settings ------------------------------------------------------
 
+# define where to include uncertainty 
+# (sr - stock recruitment,bio - biological params., sel - selectivity)
 stochastic_sr <- TRUE
 stochastic_bio <- TRUE
 stochastic_sel <- TRUE
@@ -176,15 +220,14 @@ scen$name <- paste0("Ftarg_", scen$Ftarg, "~",
 niter <- length(scen$Ftarg) # number of forecasts
 ```
 
-## Load pre-Conditioned Input data
+### 3.3 Load pre-Conditioned Input data
 
-Since we do not want to go all the way through the conditioning of the modell we just load
-the pre-conditioned MSE input and modify it accordingly to match our simulations.
+Since we do not want to go all the way through the conditioning of the modell, we just load the pre-conditioned MSE input and modify it accordingly to match our simulations.
 
 ```{r Load input data, message=F,warning=F,error=F}
 
 
-load(file = file.path("../data/input_objects", paste0(
+load(file = file.path("./data/input_objects", paste0(
   paste(stk_name, "emsrr_growth", sep = "_"), ".Rdata"
 )))
 
@@ -198,27 +241,25 @@ fleets.ctrl$catch.threshold[] <- 0.95
 # if stock is COD-NS, then remove emmigration component of M
 # "Does not include increased M values to introduce emmigration. To recover original M values add log(1-0.15) to ages >= 3 in years >= 2011"
 if(stk_name == "COD-NS"){
-  biols[[nameChange(stk_name,"new")]]@m[ac(3:RANGE["max"]), ac(min(an(dimnames(biols[[nameChange(stk_name,"new")]]@m)$year)):RANGE["maxyear"])] <- 
-    biols[[nameChange(stk_name,"new")]]@m[ac(3:RANGE["max"]), ac(min(an(dimnames(biols[[nameChange(stk_name,"new")]]@m)$year)):RANGE["maxyear"])] + log(1-0.15)
+  biols[[nameChange(stk_name,"new")]]@m[ac(3:RANGE["max"]), ac(2011:RANGE["maxyear"])] <- 
+    biols[[nameChange(stk_name,"new")]]@m[ac(3:RANGE["max"]), ac(2011:RANGE["maxyear"])] + log(1-0.15)
 }
 ```
 
-## Growth Setup
+### 3.4 Growth Setup
 
-Here we load in the growth model, which is a **linear-mixed model** fitted with `glmmTMB`,
-including an influence of **bottom temperature** and **bottom salinity** on growth.
+Here we load in the growth model, which is a **linear-mixed model** fitted with `glmmTMB`, including an influence of **bottom temperature** and **bottom salinity** on growth.
 
-First we need to bring it in the format to use it within FLBEIA, so give it a specific
-name we refer to later on, when calling the model. Also if not calculated yet, we
-extract/calculate the unexplained residual noise, that we later use to create uncertainty
-around the predicted growth.
+$logw_{t+1} = logw_{t} + age + I(age^2) + age:logw + I(age^2):logw + sal.s + temp.s + (1 | cohortf) +  (1 | yearf)$
+
+First we need to bring it in the format to use it within FLBEIA, so give it a specific name we refer to later on, when calling the model. Also if not calculated yet, we extract/calculate the unexplained residual noise, that we later use to create uncertainty around the predicted growth.
 
 ```{r Growth Setup,message = F,error=F,warning=F}
 # ----------------------------------------- #
 # prepare growth model input
   
 # load growth prediction function & modified ASPG-model
-source("../functions/growthModel_functions.R")
+source("./functions/growthModel_functions.R")
   
 # data.frame with FLBEIA stock name and official ICES one
 # only those stocks that had a significant covariate (env. or ssb)
@@ -229,7 +270,7 @@ for(i in 1:nrow(model.lut)){
     tmp = model.lut[i,]
     # get models
     mod = paste(tmp$code,tmp$method,sep = "_")
-    name_mod = load(list.files("../data/growth_models/",mod,full.names = T))
+    name_mod = load(list.files("./data/growth_models/",mod,full.names = T))
   if(length(name_mod)>1){
       # check if gFit is in the model.obj
       name_mod1 = name_mod[name_mod %in% "gFit"]
@@ -271,17 +312,17 @@ for(i in 1:nrow(model.lut)){
   
 ```
 
-The growth model gets called in a modified function `ASPG.growth` to simulate the
-age-based dynamics (the base-FLBEIA function is "ASPG" - Age-based-population-growth). In
-order for FLBEIA to know, which growth model and parameters to use we define the model
-lookup-table `model.table` as function argument to `ASPG.growth`. We also do it with the
-lookup-table for natural mortality `stk_m`, as **natural mortality gets modifed if fish
-grow** (e.g. lighter/smaller fish are more prone to predation compared to a more heavier
-fish). **Changes in catchability due to growth** need to be defined in the fleets OM,
-simulating the actual fleet behaviour. Therefore we defined a modified `SMFB`-function
-(Simple Mixed fisheries behaviour), `SMFB.growth`, where we now include the `fleets_q`
-lookup table (containing interpolated catchabilities per weight per year, and which get
-resampled during the simulation).
+The growth model gets called in a modified function `ASPG.growth` to simulate the age-based dynamics (the base-FLBEIA function is "ASPG" - Age-based-population-growth). In order for FLBEIA to know, which growth model and parameters to use we define the model lookup-table `model.table` as function argument to `ASPG.growth`. We also do it with the lookup-table for natural mortality `stk_m`, as **natural mortality gets modifed if fish grow** (e.g. lighter/smaller fish are more prone to predation compared to a more heavier fish). **Changes in catchability due to growth** need to be defined in the fleets OM, simulating the actual fleet behaviour. Therefore we defined a modified `SMFB`-function (Simple Mixed fisheries behaviour), `SMFB.growth`, where we now include the `fleets_q` lookup table (containing interpolated catchabilities per weight per year, and which get resampled during the simulation).
+
+```{r show input to the growth model,message=F,error=F,warning=F}
+
+# look at the model-lookup table
+print(model.table)
+# look at the interpolated m for the stk
+head(stks_m[[nameChange(stk_name,"new")]])
+# look at fleets_q
+head(fleets_q$fl1$mt1[[nameChange(stk_name,"new")]])
+```
 
 ```{r growth setup 2, message=F,error=F,warning=F}
   # explicitly add the model lookup table to the function arguments of 
@@ -293,25 +334,22 @@ resampled during the simulation).
   formals(SMFB.growth)$fleets_q = fleets_q # the catchability curves
 ```
 
-Now we prepare the growth covariates. As I mentioned earlier, we have bottom temperature
-and bottom salinity averaged over the ICES stock area influencing the growth of cod.
+Now we prepare the growth covariates. As I mentioned earlier, we have bottom temperature and bottom salinity averaged over the ICES stock area influencing the growth of cod.
 
-We load an input object containing 100 time series per covariate for each RCP-scenario
-(RCP4.5 and RCP8.5). Those time series are bias-corrected and BVAR-generated (see previous
-tutorials) realisations of the POLCOMS-ERSEM regionally-downscaled climate projection for
-the North Atlantic.
+We load an input object containing 100 time series per covariate for each RCP-scenario (RCP4.5 and RCP8.5). Those time series are bias-corrected and BVAR-generated (see previous tutorials) realisations of the POLCOMS-ERSEM regionally-downscaled climate projection for the North Atlantic.
 
-In order to have a "baseline" to compare to, we generate a 'noCC' or 'Current' climate
-scenario, where we remove the trend from the RCP4.5 scenario. Based on RCP-scenarios, we
-prepare also the environmental data corresponding to the mean of the periods 2030, 2040
-and 2050 that we use to inform the simulations in order to get reference point changes for
-those periods.
+In order to have a "baseline" to compare to, we generate a 'noCC' or 'Current' climate scenario, where we remove the trend from the RCP4.5 scenario. Based on RCP-scenarios, we prepare also the environmental data corresponding to the mean of the periods 2030, 2040 and 2050 that we use to inform the simulations in order to get reference point changes for those periods.
 
 ```{r Prepare the growth Covars,message=F,warning=F,error=FALSE}
 
   # prepare growth covar-objects #
   # -------------------------------- #
-    load("../data/growth_covars/Stock_ICES.avg_projections.RData")
+    load("./data/growth_covars/Stock_ICES.avg_projections.RData")
+
+  # look at the structure
+  str(Stock_ICES.avg_projections,
+      max.level = 2)
+
 
   # restructure to have variables all under one projection 
   # (temp & salt under rcp4.5)
@@ -457,22 +495,15 @@ p2 = ggplot(tmp[grepl("COD",tmp$stock) & tmp$var == "temp" &
   ggtitle("Climate averages")
 
 # plot together
-p = p1/p2 & theme_void()
+p = p1/p2 & dark_theme_gray()
 print(p)
 ```
 
-To pass the growth covariates to FLBEIA we need to convert those to `FLquant` objects.
-Therefore I made a few helper-functions.
+To pass the growth covariates to FLBEIA we need to convert those to `FLquant` objects. Therefore I made a few helper-functions.
 
-The `prep_GrowthEnv_covars`-function converts the prepared covariate data.frames to
-`FLQuants`. Similarly, I got a function `prep_Growth.Uncertainty.by.age_covars` that
-handles the `FLQuant` generation of the growth-model noise component. Additionally, a last
-function `prep_catchability_covars` handles the coersion of resampled catchabilites to a
-`FLQuant` object.
+The `prep_GrowthEnv_covars`-function converts the prepared covariate data.frames to `FLQuants`. Similarly, I got a function `prep_Growth.Uncertainty.by.age_covars` that handles the `FLQuant` generation of the growth-model noise component. Additionally, a last function `prep_catchability_covars` handles the coersion of resampled catchabilites to a `FLQuant` object.
 
-It is a bit of an overkill here and rather inflates the code, but trust me, if you got a
-bunch of stocks (which you definitely have in a mixed fisheries setting), it comes quite
-in handy...
+It is a bit of an overkill here and rather inflates the code, but trust me, if you got a bunch of stocks (which you definitely have in a mixed fisheries setting), it comes quite in handy...
 
 ```{r Prepare functions to handle Growth covars,message=F,warning=F,error=F}
 # function to prepare covars object
@@ -563,12 +594,11 @@ prep_GrowthEnv_covars = function(df, first.yr,last.yr){
   
 ```
 
-## Uncertainty Setup
+### 3.5 Uncertainty Setup
 
 Here we define the resampling schemes for different biological parameters.
 
-Add uncertainty in the EMSRR via resampling of the EMSRR-model + uncertainty in the
-environmental covariates.
+Add uncertainty in the EMSRR via resampling of the EMSRR-model + uncertainty in the environmental covariates.
 
 Additionally define the noise component of the growth model.
 
@@ -690,10 +720,9 @@ if(!eqsim_lut[[stk_name]]$bio_const){ # sample years if not const mean value use
 }
 ```
 
-## Env. Period Setup
+### 3.6 Env. Period Setup
 
-As we did for the growth model already, we also need to setup the environmental data used
-by the stock-recruitment relationship in those periods (2030, 2040, 2050) and RCPs.
+As we did for the growth model already, we also need to setup the environmental data used by the stock-recruitment relationship in those periods (2030, 2040, 2050) and RCPs. The stock recruitment relationship for cod uses only temperature (PC1 of North Sea SST) as covariate.
 
 ```{r Define environmental data for specific periods}
 # replace the EMSRRs by a "no change climate signal" (aka. RCP4.5 without trend)
@@ -730,9 +759,11 @@ if(stk_name %in% emsrr_lut$stk_flbeia){
 }
 ```
 
-## Setup simulation function
+## 4. FLBEIA simulations
 
-Definition of the simulation function that gets executed in parallel:
+### 4.1 Setup simulation function
+
+Definition of the simulation function that gets executed in parallel: Here we query the scenario table `scen` and based on that modify the inputs of our simulations. Uncertainty (both resampled and environmental) is included for each iteration in a Monte-Carlo fashion.
 
 ```{r Parallel Setup}
 # parallel execution function -----
@@ -913,11 +944,9 @@ parFun <- function(x){
 }
 ```
 
-## Simulation
+### 4.2 Simulation
 
-Now we can simulate for the pre-defined scenarios. However, as this is quite computational
-expensive (\~12h on 20 server-cores), we skip this here and only look at the prepared
-output.
+Now we can simulate for the pre-defined scenarios. However, as this is quite computational expensive (\~12h on 20 server-cores for 100 iterations), we skip this here and only look at the prepared output. The code is here for completeness.
 
 ```{r Simulating,eval = F}
 clusterType <- ifelse(Sys.info()["sysname"] == "Windows", "PSOCK", "FORK")
@@ -964,14 +993,15 @@ save(scen, file = file.path("model", "refpts",
 # end
 ```
 
-## Summarise results
+## 5. Summarise results
 
-We now summarise the results and calculate the changes in Ref-pts (in terms of Btrigger
-and Fmsy) for the different periods.
+We now summarise the results and calculate the changes in Ref-pts (in terms of Btrigger and Fmsy) for the different periods.
+
+Therefore, we calculate the median ssb and landings in the equillibrium (last 10 years of the simulation) of each iteration and fit a smooth-spline to the respective yield curve (landings\~F) and biomass curve (ssb\~F). The F, where the maximum of the yield-curve lies is taken as Fmsy. Bmsy is calculated as the SSB at Fmsy and Btrigger respectively as the 5% quantile of the SSB when fishing at this Fmsy.
 
 ```{r Summarise outputs}
 
-load(file = "../data/BRPs.Rdata")
+load(file = "./data/BRPs.Rdata")
 BRPs2 <- BRPs
 
 # global settings ------------------------------------------------------
@@ -981,7 +1011,7 @@ BRPs2[,paste(rep(c("FLBEIA_Fmsy","FLBEIA_Fp05"),
                  each = length(rcps)),rcps,sep = "_")] <- NaN
 
 # get output of MSE-simulations
-stk.obj_list = list.files("../model/refpts/","stkObj")
+stk.obj_list = list.files("./model/refpts/","stkObj")
 # read in 
 # produce an overall list with ref.point changes
 Ref_changes_list = list()
@@ -991,16 +1021,16 @@ max.hist.yr = max(an(dimnames(stock)$year))
   
 # get RES obj.
 # load stock objects that are output from the MSE runs
-load(file.path("../model/refpts/",grep(stk_name,stk.obj_list,value = T)))
+load(file.path("./model/refpts/",grep(stk_name,stk.obj_list,value = T)))
 # RES = list of stock-obj over all iterations
 max.forecast.yr = unique(sapply(RES,function(x) max(an(dimnames(x)$year))))
   
 # collate all scen objects
-fnames <- list.files(path = "../model/refpts", pattern = c(stk_name), include.dirs = F)
+fnames <- list.files(path = "./model/refpts", pattern = c(stk_name), include.dirs = F)
   fnames <- fnames[grep(pattern = "scen", fnames)]
   tmp <- vector("list", length(fnames))
   for(i in seq(fnames)){
-    tmp.i <- load(file.path("../model/refpts", fnames[i]))
+    tmp.i <- load(file.path("./model/refpts", fnames[i]))
     tmp[[i]] <- get(tmp.i)
   }
   scen <- do.call("rbind", tmp)
@@ -1068,11 +1098,11 @@ fnames <- list.files(path = "../model/refpts", pattern = c(stk_name), include.di
 }
 ```
 
-## Analyse Output
+## 6. Analyse Output
 
-Now we visualise the output.
+Now we visualize the output, plotting the yield curves and evaluate how climate change might affect reference points if explicit environmental effects are included to affect growth and recruitment of North Sea cod.
 
-```{r Analyse output,warning=F,error=F}
+```{r Analyse output,warning=F,error=F,fig.width=10,fig.height=6}
 
 dfref <- vector("list", length(stk_name))
 dfts <- vector("list", length(stk_name)) 
@@ -1149,39 +1179,22 @@ head(dfref2)
 
 p <- ggplot(data = dfref2) + 
   aes(x = period, y = value, color = climate, group = climate) + 
-  facet_grid(variable~stock, scales = "free_y") + 
+  facet_wrap(~variable, scales = "free_y") + 
   geom_point(size = 2) + 
   geom_line() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  ylab("") +
+  scale_colour_manual(values = c("orange","darkred")) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ggtitle(paste("Ref-pts. changes",stk_name)) +
+  dark_theme_gray()
 
-# Fmsy
-p1 <- ggplot(data = dfref) + 
-  aes(x = period, y = Fmsy, color = climate, group = climate) + 
-  facet_wrap(~stock, nrow = 1, scales = "free_y") + 
-  geom_point(size = 2) + 
-  geom_line() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-# Bmsy
-p2 <- ggplot(data = dfref) + 
-  aes(x = period, y = Bmsy, color = climate, group = climate) + 
-  facet_wrap(~stock, nrow = 1, scales = "free_y") + 
-  geom_point(size = 2) + 
-  geom_line() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-# Btrigger
-p3 <- ggplot(data = dfref) + 
-  aes(x = period, y = Btrigger, color = climate, group = climate) + 
-  facet_wrap(~stock, nrow = 1, scales = "free_y") + 
-  geom_point(size = 2) + 
-  geom_line() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-p <- (p1 | p2 | p3) +
-  plot_layout(guides = "collect", axes = "collect_x", axis_titles = "collect_x")
 print(p)
 
+```
+
+So what we see here is that cod is negatively affected by climate change (mainly due to the negative effect of temperature on recruitment) and this results in decreasing reference points for Fmsy, Bmsy and Btrigger. The decrease is even stronger for the RCP8.5 scenario than the RCP4.5 scenario, although the differences are not that pronounced until mid-century. In the 2050s the deviations between the two RCPs get stronger and as such also the difference in reference points.
+
+```{r Plot yield curves,message=F,warning=F,error=F}
 # yield curve --------------------------------------------------------
 
 p1 <- ggplot(data = subset(dfts, stock == stk_name)) + 
@@ -1189,18 +1202,64 @@ p1 <- ggplot(data = subset(dfts, stock == stk_name)) +
     facet_wrap(~climate, ncol = 1) +
     geom_line() + 
     geom_point(data = subset(dfref, stock == stk_name), 
-               mapping = aes(x = Fmsy, y = MSY)) 
+               mapping = aes(x = Fmsy, y = MSY)) + 
+  scale_color_brewer(palette = "OrRd")
 
 p2 <- ggplot(data = subset(dfts, stock == stk_name)) + 
     aes(x = Ftarget, y = SSB, color = period, group = period) + 
     facet_wrap(~climate, ncol = 1) +
     geom_line() + 
     geom_point(data = subset(dfref, stock == stk_name), 
-               mapping = aes(x = Fmsy, y = Bmsy)) 
+               mapping = aes(x = Fmsy, y = Bmsy)) + 
+  scale_color_brewer(palette = "OrRd")
   
-p <- (p1 | p2) +
+p <- (p1 | p2)  + 
     plot_annotation(title = stk_name) & 
-    plot_layout(guides = "collect", axes = "collect_x")
+    plot_layout(guides = "collect", axes = "collect_x") & 
+    dark_theme_gray()
 print(p)
   
 ```
+
+## 7. Summary
+
+With this tutorial we have learned:
+
+-   how to estimate reference points in a MSE framework (with FLBEIA)
+-   how productivity changes under climate change might affect reference points and how we could simulate it
+
+A next step would be to use those results to inform forward projections under different harvest control rules explicitly accounting for changes in reference points. Therefore we would mimic in a way the constant updating of reference points in the ICES framework and see if longer term management strategy plans are also robust in regards to those reference point changes. A further step would be to transfer those into the mixed fisheries framework, which is what we usually use FLBEIA for and see the effect on several stocks with included productivity changes on typical mixed fisheries questions e.g. technical interactions (choking effects).
+
+## 8. Software Versions
+
+`r version$version.string`
+
+**basetheme:** `r packageVersion('basetheme')`
+
+**earth:** `r packageVersion('earth')`
+
+**FLash:** `r packageVersion('FLash')`
+
+**FLAssess:** `r packageVersion('FLAssess')`
+
+**FLBEIA:** `r packageVersion('FLBEIA')`
+
+**FLCore:** `r packageVersion('FLCore')`
+
+**FLFleet:** `r packageVersion('FLFleet')`
+
+**ggdark:** `r packageVersion('ggdark')`
+
+**ggplotFL:** `r packageVersion('ggplotFL')`
+
+**ggplot2:** `r packageVersion('ggplot2')`
+
+**glmmTMB:** `r packageVersion('glmmTMB')`
+
+**patchwork:** `r packageVersion('patchwork')`
+
+**plyr:** `r packageVersion('plyr')`
+
+**stringr:** `r packageVersion('stringr')`
+
+Compiled: `r format(Sys.Date(), '%Y-%b-%d')`

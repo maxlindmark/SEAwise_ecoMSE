@@ -1,0 +1,2127 @@
+---
+title: "Shortcut-MSE including env. processes in FLBEIA"
+author: "Bernhard Kuehn & Marc Taylor - Thünen SF"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  cleanrmd::html_document_clean:
+    toc: true
+    mathjax: default
+    use_fontawesome: true
+    theme: water-dark
+    highlight: "breezedark"
+    df_print: paged
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+# extract all R-code-chunks and write to R-Script
+knitr::opts_chunk$set(echo = TRUE,
+                      message = F,warning = F, error = F)
+```
+
+```{css, echo=FALSE}
+p {
+ font-size: 18px;
+ width: 800px;
+ max-width: 1100px;
+}
+h1 {
+  width: 800px;
+}
+h2 {
+  width: 800px;
+}
+div {
+  font-size: 16px;
+  width: 800px;
+  max-width: 1100px;
+}
+pre {
+  font-size: 16px;
+  width: 800px;
+  max-width: 1100px;
+}
+```
+
+## 1. Introduction
+
+Now that we have modeled environmental influences on recruitment and growth of a stock, we want to see how we can incorporate those processes into long-term stock projections in an MSE framework. Therefore we use FLBEIA (bioeconomic impact assessment using FLR), a model that is normally used to set up mixed fisheries simulations (as it allows to define a more complex fleet behaviour).
+
+Here we only use it in its simplest configuration: the one stock, one fleet model. The reason is that the conditioning of the FLBEIA model can get quite overwhelming already, especially as we add some twists to it due to the incorporation of explicit environmental effects. So adding a mixed-fisheries perspective would be overkill in this tutorial. But if you understand the basic concepts, those will also be applicable to a more complex mixed fisheries simulation. As an example stock, we again use North Sea cod.
+
+For the explicit, environmentally-mediated stock-recruitment relationship (EMSRR) we use a Beverton-Holt (BH) model with a linear influence of temperature (1st PC of North Sea SST). The model formulation is slightly different of what you might know and what Isabella has already shown in her tutorial. It is a BH fit to the SRR-pairs and a subsequent MARS-model (Multivariate adaptive regression splines) fit to the residuals of the SRR to account for the environmental effect. Since, the effect came out as linear, the MARS-model can also be swapped with a glm, but since I was too lazy to do all the refitting again for this tutorial I left it as it is. ;)
+
+The explicit growth model we include here is a linear-mixed model fitted with `glmmTMB` including the effect of bottom temperature and bottom salinity on cod growth.
+
+**The goals of this tutorial:**
+
+-   set up a (short-cut) MSE in FLBEIA
+-   include an explicit environmental influence (rec. & growth)
+-   see how a stock & harvesting might be affected by climate change (RCP4.5 & RCP8.5)
+
+## 2. R-setup
+
+### 2.1 Required packages to run this tutorial
+
+In order to execute the code in this tutorial you should have the following packages installed:
+
+-   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/), [earth](https://cran.r-project.org/web/packages/earth/), [cobs](https://cran.r-project.org/web/packages/cobs/), [basetheme](https://cran.r-project.org/web/packages/basetheme/)
+-   FLR: [FLCore](https://flr-project.org/FLCore/), [FLFleet](https://flr-project.org/FLFleet/), [FLash](https://flr-project.org/FLash/), [FLAssess](https://flr-project.org/FLAssess/), [FLBEIA](https://flr-project.org/FLBEIA/), [ggplotFL](https://flr-project.org/ggplotFL/)
+
+```{r Install packages,eval=FALSE}
+
+install.packages( c("FLCore", "FLFleet", "FLBEIA", "ggplotFL", 
+                    "FLash", "FLAssess"), 
+                  repos="http://flr-project.org/R")
+install.packages( c("glmmTMB","earth","basetheme"))
+
+```
+
+### 2.2 Download data
+
+The data for this tutorial can be downloaded directly from figshare.
+
+```{r Download input data, message = F}
+# automatically download input files for the tutorial from figshare
+
+# url for the data for the tutorial on "ways to summarise env data"
+url = "https://figshare.com/ndownloader/files/50834880?private_link=fc89683a94c1089ab4aa"
+
+# specify data to download
+fn <- "FLBEIA_MSE.zip" # 443mb
+# directory to store data (create data directory in the folder of each practical)
+fp <- "./"
+
+# (increase timeout for larger files)
+options(timeout = max(300, getOption("timeout")))
+# download only if the files do not exist yet
+dir.nms = list.dirs("./",recursive = F)
+if(!all(c("./data","./model","./functions") %in% dir.nms)){
+# download
+download.file(url = url,file.path(fp,fn),mode = "wb")
+# unzip
+unzip(file.path(fp,fn),exdir = fp)
+# remove original zip-download
+unlink(file.path(fp,fn))
+}
+```
+
+Load all the necessary packages:
+
+```{r Load packages}
+library(FLBEIA)
+library(FLCore)
+library(FLash)
+library(FLAssess)
+library(FLFleet)
+library(ggplotFL)
+library(parallel)
+library(glmmTMB)
+library(earth)
+library(basetheme)
+
+#set dark mode for base plots
+basetheme("deepblue")
+```
+
+## 3. FLBEIA Conditioning
+
+This is the part that is used for setting up the main model, before simulation, which is quite a tedious process, but needs to be done anyway. Good that the basic FLBEIA functionality has some build-in smart-conditioning functions, that make our lives a lot easier. The smart-conditioning functions are described in the Manual of FLBEIA, within the ‘doc’ folder of the package installation or typing help(package = FLBEIA) in the R console. Additionally see the [FLBEIA-tutorial on Conditioning](https://flr-project.org/doc/FLBEIA_Conditioning.html) on the FLR-homepage.
+
+In this example the Operating Model (OM) consists of a single age-structured stock (North Sea cod, stock definition of 2022), harvested by one fleet (fl1) with one unique metier (mt1). The time step is annual with only one interation. The historic data are truncated to go from 2000 to 2021 and the projection period from 2022 to 2061.
+
+-   **Operating model (OM):**
+    -   Population dynamics: Age structured population growth (**modfied!**)
+    -   Stock recruitment model: Beverton and Holt (**modified!**)
+    -   Fleet dynamics: Simple Mixed Fisheries Behaviour
+    -   Covariates dynamics: environmental covariates (**modified!**)
+-   **Management procedure (MP):** (short-cut MSE)
+    -   Observation: perfect observation
+    -   Assessment: no assessment
+    -   Management advice: ICES harvest control rule
+
+In order to run `FLBEIA` we require a number of input objects such as:
+
+-   **Main OM-objects:** (hold actual data)
+    -   biols (holds the biology of the stock)
+    -   SRs (holds the Stock-recruitment formulation)
+    -   BDs
+    -   fleets (holds the fleet definitions)
+    -   covars (can be environmental, but also economic covariates)
+    -   indices (not needed for this example)
+-   **Main MP-object:**
+    -   advice (holds the advice information)
+-   **Control-objects:** (define functions needed to execute the OM and MP)
+    -   main.ctrl
+    -   biols.ctrl
+    -   fleets.ctrl
+    -   covars.ctrl
+    -   obs.ctrl
+    -   assess.ctrl
+    -   advice.ctrl
+
+These objects contain biological and economical historical and projection data, and also point to the functions that are going to be used by the model.
+
+### 3.1 Load/Create helper functions & lookup tables
+
+```{r Load functions & lookup tables}
+# required functions ------------------------------------------------------
+
+source("./functions/nameChange.R")
+source("./functions/create.fleets.data_tmp.R")
+
+# matrix plotting function
+mat.plot = function(x,add = FALSE, ...){
+  n = ncol(x)
+  if(add == FALSE){
+    plot(x[,1],x[,2],type = "l",...)
+    for(i in 1:n){
+      lines(x[,1],x[,i],type = "l",...)
+    }  
+  } else {
+    for(i in 1:n){
+      lines(x[,1],x[,i],type = "l",...)
+    }  
+  }
+}
+
+# load look-up tables ------------------------------------------------------
+
+load(file = "./data/eqsim_lut.Rdata")
+load(file = "./data/BRPs.Rdata")
+
+stk_name = "COD-NS"
+# define stk look-up-table for EMSRRs
+emsrr.lut.stk = data.frame(stk = "Cod",
+                           flbeia_stk = stk_name)
+# load the input stock obj
+load(paste0("./data/input_objects/", stk_name,"_stock.obj", ".RData"), verbose = F)
+
+```
+
+### 3.2 Global Settings
+
+Define the global settings:
+
+```{r Define global conditioning setup, message=F,warning=F,error=F}
+
+# start of conditioning ---------
+yr.now <- 2022
+yr.TACp1 <- yr.now + 1
+BlimBloss <- BRPs[stk_name, "Blim"]
+
+# trim stock
+stock <- FLCore::window(stock, end = yr.now-1)
+  
+DIMS <- dims(stock)
+RANGE <- range(stock)
+  
+# replace any NAs in landings, discards
+landings.n(stock)[is.na(landings.n(stock))] <- 0
+discards.n(stock)[is.na(discards.n(stock))] <- 0
+catch.n(stock)[is.na(catch.n(stock))] <- 0
+  
+discards(stock) <- computeDiscards(stock)
+landings(stock) <- computeLandings(stock)
+catch(stock) <- computeCatch(stock)
+  
+# Global settings
+first.yr          <- 2000 # limit number of historical years in creation of those objects 
+proj.yr           <- unname(RANGE["maxyear"]) + 1
+last.yr           <- 2061
+hist.yrs  <- ac(first.yr:(proj.yr-1))
+proj.yrs  <- ac(proj.yr:last.yr)
+ni <- 1 # number of iterations
+ns <- 1 # number of seasons
+  
+# Year extent in objects
+(yrs = unlist(list("first.yr" = first.yr, "proj.yr" = proj.yr, "last.yr" = last.yr)))
+
+```
+
+### 3.3 FLBiols
+
+Build 'FLBiols' objects: This object holds all the relevant biological parameters of the stock as part of the operating model (OM).
+
+```{r Build FLBiols}
+# Build FLBiols -------------------------------------------------------
+biol.proj.avg.yrs <- (proj.yr-3):(proj.yr-1) # for average biological params (e.g. weights)
+  
+stks.data <- vector("list", 1)
+names(stks.data) <- nameChange(stk_name,"new") #"stk" # name according to the stock name
+
+stk <- names(stks.data)[1]
+BIOL <- as(stock[,hist.yrs], 'FLBiol')
+  
+stks.data[[stk]] <- paste0(
+    stk,
+    c(
+      ".unit",
+      ".age.min",
+      ".age.max",
+      "_n.flq",
+      "_wt.flq",
+      "_m.flq",
+      "_fec.flq",
+      "_mat.flq",
+      "_spwn.flq",
+      "_range.plusgroup",
+      "_range.minyear",
+      "_range.maxyear",
+      "_range.minfbar",
+      "_range.maxfbar",
+      "_biol.proj.avg.yrs"
+    )
+  )
+  
+# ensure consistent age dimension and remove NAs in spwn
+stkSpwn <- stock@m.spwn[,hist.yrs]
+stkSpwn <- replace(stkSpwn, is.na(stkSpwn), 0)
+spwn(BIOL) <- stkSpwn
+  
+assign(paste0(stk, ".unit"), DIMS$unit)
+assign(paste0(stk, ".age.min"), RANGE["min"])
+assign(paste0(stk, ".age.max"), RANGE["max"])
+assign(paste0(stk, "_n.flq"), stock@stock.n[,hist.yrs])
+assign(paste0(stk, "_wt.flq"), stock@stock.wt[,hist.yrs])
+assign(paste0(stk, "_m.flq"), stock@m[,hist.yrs])
+assign(paste0(stk, "_fec.flq"), fec(BIOL))
+assign(paste0(stk, "_mat.flq"), mat(BIOL))
+assign(paste0(stk, "_spwn.flq"), spwn(BIOL))
+assign(paste0(stk, "_range.plusgroup"), RANGE["plusgroup"])
+assign(paste0(stk, "_range.minyear"), range(BIOL)["minyear"])
+assign(paste0(stk, "_range.maxyear"), range(BIOL)["maxyear"])
+assign(paste0(stk, "_range.minfbar"), RANGE["minfbar"])
+assign(paste0(stk, "_range.maxfbar"), RANGE["maxfbar"])
+assign(paste0(stk, "_biol.proj.avg.yrs"), biol.proj.avg.yrs)
+  
+# create biols...  
+biols <- create.biols.data( # by default FLBEIA copies data only for hist.yrs so cannot fill up proj.yrs
+    yrs = yrs, ns = ns, ni = ni,
+    stks.data = stks.data)
+
+# show the structure of the biols obj. 
+str(biols[[nameChange(stk_name,"new")]],max.level = 2)
+```
+
+### 3.4 FLFleets
+
+Build 'FLFleetExt'-object: The next part generates the fleets object, which defines the fleet behaviour in the fleet-OM. As FLBEIA is usually a mixed-fisheries modelling framework, you can specify a quite complex fleet/métier combination, but for simplicity we only work with one fleet and one métier for now. The object contains information for the fleet fl1 (effort, costs, capacity, …) and nested within the fleet definition information on the metier met1 (effort share, landings, discards, variable costs, parameters of the Cobb Douglas function). Since we do not use the economic functionality of FLBEIA here, we leave most of the cost structure blank.
+
+```{r Build FLfleets}
+# 5. build fleets ------------------------------------------------------------
+  
+# year ranges
+year_range <- first.yr:(proj.yr-1)
+plus_group <- RANGE["plusgroup"]
+  
+# make empty slots
+flq <- FLQuant(0,dimnames=list(year=year_range))
+dat <- FLQuant(0,dimnames=list(year=year_range), units="t", quant="age")
+flqa <- FLQuant(0,dimnames=list(age=RANGE["min"]:RANGE["max"],year=year_range))
+  
+fl.nam <- "fl1"
+met.nam <- "mt1"
+  
+general_proj.ave.years <- (proj.yr-3):(proj.yr-1) # years to average for forecast years
+  
+fls.data <- vector("list", 1)
+names(fls.data) <- "fl1"
+  
+fls <- names(fls.data)
+for(i in seq(fls) ){ ### for each fleet
+    
+ # effort and capacity
+   eff <- flq
+   eff[] <- 1
+   units(eff) <- "000 kWdays"
+   assign(paste0(fls[i], "_effort.flq"), eff)
+   assign(paste0(fls[i], "_capacity.flq"), eff*1e6)
+   
+   fls.data[[fls[i]]] <- c(
+     fls.data[[fls[i]]],
+     paste0(fls[i], "_effort.flq"),
+     paste0(fls[i], "_capacity.flq")
+    )
+    
+  # fixed costs
+  fcosts <- flq
+  units(fcosts) <- "Euros"
+  assign(paste0(fls[i], "_fcost.flq"), fcosts)
+  
+  fls.data[[fls[i]]] <- c(
+    fls.data[[fls[i]]],
+    paste0(fls[i], "_fcost.flq")
+   )
+    
+   # projection years
+  assign(paste0(fls[i], "_proj.avg.yrs"), general_proj.ave.years)
+  fls.data[[fls[i]]] <- c(
+    fls.data[[fls[i]]],
+    paste0(fls[i], "_proj.avg.yrs")
+    )
+    
+  mets <- met.nam
+    
+  assign(paste0(fls[i], ".mets"), mets)
+  fls.data[[fls[i]]] <- c(
+      fls.data[[fls[i]]],
+      paste0(fls[i], ".mets")
+    ) 
+    
+  for( j in seq(mets) ){ ### for each metier
+      
+    # assign effshare of fl/met
+    effsh <- flq
+    effsh[] <- 1
+    units(eff) <- "proportion"
+    assign(paste0(fls[i], ".", mets[j], "_effshare.flq"), effsh)
+      fls.data[[fls[i]]] <- c(
+      fls.data[[fls[i]]],
+      paste0(fls[i], ".", mets[j], "_effshare.flq")
+      )
+      
+    # projection years
+    assign(paste0(fls[i], ".", mets[j], "_proj.avg.yrs"), general_proj.ave.years)
+      fls.data[[fls[i]]] <- c(
+      fls.data[[fls[i]]],
+      paste0(fls[i], ".", mets[j], "_proj.avg.yrs")
+      )
+      
+    stks <- names(biols)
+      
+    assign(paste0(fls[i], ".", mets[j], ".stks"), stks)
+    fls.data[[fls[i]]] <- c(
+        fls.data[[fls[i]]],
+        paste0(fls[i], ".", mets[j], ".stks")
+      )    
+      
+    for( k in seq(stks) ){ ### for each stock
+  
+      # make alpha and beta
+        ones <- flqa*0 + 1
+        units(ones) <- "NA"
+        
+        ### assign data
+        la.n <- stock@landings.n; units(la.n) <- "10^3"
+        di.n <- stock@discards.n; units(la.n) <- "10^3"
+        la.wt <- stock@landings.wt; units(la.n) <- "kg"
+        di.wt <- stock@discards.wt; units(la.n) <- "kg"      
+        
+        # landings.n
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_landings.n.flq"), la.n[,ac(year_range),])
+        # landings.wt
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_landings.wt.flq"), la.wt[,ac(year_range),] )
+        # discards.n
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_discards.n.flq"), di.n[,ac(year_range),] )
+        # discards.wt
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_discards.wt.flq"), di.wt[,ac(year_range),] )
+        # price
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_price.flq"), ones )
+        # catch.q
+        # assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_catch.q.flq"), catch@catch.q )
+        # alpha
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_alpha.flq"), ones )
+        # beta
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_beta.flq"), ones )
+        
+        # projection years
+        assign(paste0(fls[i], ".", mets[j], ".", stks[k], "_proj.avg.yrs"), general_proj.ave.years )
+        
+        # add slot names to fls.data
+        fls.data[[fls[i]]] <- c(
+          fls.data[[fls[i]]],
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_landings.n.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_landings.wt.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_discards.n.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_discards.wt.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_price.flq"),
+          # paste0(fls[i], ".", mets[j], ".", stks[k], "_catch.q.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_alpha.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_beta.flq"),
+          paste0(fls[i], ".", mets[j], ".", stks[k], "_proj.avg.yrs")
+        )
+        
+        print(paste("###", "fl", i, "|", "met", j, "|", "stk", k, paste0("(",stks[k],")"), "###"))
+        
+      } ### end of stks loop
+    } ### end of mets loop
+  } ### end of fls loop
+  
+  stks.data <- vector("list", length(biols))
+  names(stks.data) <- names(biols)
+  stks <- names(biols)
+  for(i in seq(biols)){
+    
+    DIMS <- dims(biols[[i]])
+    RANGE <- range(biols[[i]])
+    
+    stks.data[[stks[i]]] <- paste0(
+      stks[i],
+      c(
+        ".unit",
+        ".age.min",
+        ".age.max",
+        "_n.flq"
+      )
+    )
+    
+    assign(paste0(stks[i], ".unit"), DIMS$unit)
+    assign(paste0(stks[i], ".age.min"), RANGE["min"])
+    assign(paste0(stks[i], ".age.max"), RANGE["max"])
+    assign(paste0(stks[i], "_n.flq"), biols[[i]]@n[,hist.yrs])
+    
+    stks.data[[stks[i]]] <- c(stks.data[[stks[i]]], paste0(stks[i], "_m.flq"))
+    assign(paste0(stks[i], "_m.flq"), biols[[i]]@m[,hist.yrs])
+    
+  }
+  
+  t1 <- Sys.time()
+  stks <- names(biols)
+  # fleets <- FLBEIA::create.fleets.data(
+  fleets <- create.fleets.data_tmp(
+    yrs = yrs,
+    ns = ns,
+    ni = ni,
+    fls.data = fls.data,
+    stks.data = stks.data
+  )
+  
+# show the structure of the fleets obj. 
+str(fleets$fl1,max.level = 2)
+# look at the metiers
+str(fleets$fl1@metiers$mt1,max.level = 2)
+
+```
+
+### 3.5 SRR
+
+Define the stock-recruitment object (SRs): Here the 'basic' stock recruitment object is created. Even though this gets later replaced with our environmentally-mediated SRR (EMSRR), the object needs to be initialised first. In this step, we also generate the data structures holding the resampling parameters to include variability.
+
+```{r Build SRRs, message=F,warning=F,error=F,results=F}
+# 4. Build SRRs ---------------------------------------------------
+  
+# Fit SRR as a placeholder - params and model definition will be overwritten in runs
+  srr_years <- an(hist.yrs)
+  stks.data <- vector("list", length(biols))
+  names(stks.data) <- names(biols)
+  for(i in seq(biols)){
+    stk <- names(biols)[i]
+    DIMS <- dims(biols[[i]])
+    RANGE <- range(biols[[i]])
+    
+    stks.data[[stk]] <- paste0(
+      stk,
+      c(
+        ".unit",
+        ".age.min",
+        ".age.max",   
+        "_sr.model",
+        "_params.n",
+        "_params.name",
+        "_params.array",        
+        "_rec.flq",
+        "_ssb.flq",
+        "_proportion.flq",
+        "_prop.avg.yrs",
+        "_timelag.matrix",        
+        "_range.plusgroup",
+        "_range.minyear",
+        "_uncertainty.flq"
+      )
+    )
+    
+    assign(paste0(stk, ".unit"), DIMS$unit)
+    assign(paste0(stk, ".age.min"), RANGE["min"])
+    assign(paste0(stk, ".age.max"), RANGE["max"])
+    
+    sr_type <- 'bevholt'
+    assign(paste0(stk, "_sr.model"), sr_type)
+    
+    # params
+    tmp1 <- stock[,ac(srr_years)]
+    tmp2 <- as.FLSR(tmp1)
+    model(tmp2) <- sr_type
+    tmp2 <- fmle(tmp2)
+    # plot(tmp2)
+    
+    tmp3 <- as.data.frame(tmp2@params)
+    tmpdf <- expand.grid(
+      param = tmp3$params,
+      year = seq(first.yr, last.yr),
+      unit = "unique",
+      season = seq(dims(tmp1)$season),
+      area = "unique",
+      iter = 1
+    )
+    tmpdf$data <- tmp3$data[match(tmpdf$param, tmp3$params)]
+   
+    # stk1_params.array
+    tmp4 <- xtabs2(
+      data~param+year+season+iter,
+      data=tmpdf,
+      exclude=NULL,
+      na.action=na.pass
+    )
+    
+    
+    # stk1_params.n
+    assign(
+      paste0(stk, "_params.n"),
+      length(tmp3$params)
+    )
+    
+    # stk1_params.name
+    assign(
+      paste0(stk, "_params.name"),
+      as.character(tmp3$params)
+    )
+    
+    assign(
+      paste0(stk, "_params.array"),
+      tmp4
+    )
+    
+    # stk1_rec.flq
+    assign(
+      paste0(stk, "_rec.flq"),
+      rec(tmp1)[,ac(first.yr:(proj.yr-1))]
+    )
+    
+    # stk1_ssb.flq
+    assign(
+      paste0(stk, "_ssb.flq"),
+      ssb(tmp1)[,ac(first.yr:(proj.yr-1))]
+    )
+    
+    # stk1_proportion.flq
+    assign(
+      paste0(stk, "_proportion.flq"),
+      FLQuant(1, dimnames=list(age="all", year=first.yr:last.yr, unit=1, season=1))
+    )
+    
+    # stk_prop.avg.yrs
+    assign(paste0(stk, "_prop.avg.yrs"), hist.yrs)
+    
+    
+    # stk1_timelag.matrix
+    assign(
+      paste0(stk, "_timelag.matrix"),
+      matrix(c(ifelse(dims(tmp1)$min==0, 1, dims(tmp1)$min),1), nrow=2, ncol=ns, dimnames = list(c('year', 'season'),'all'))
+    )
+    
+    assign(paste0(stk, "_range.plusgroup"), RANGE["plusgroup"])
+    assign(paste0(stk, "_range.minyear"), RANGE["minyear"])
+    
+    # stk1_uncertainty.flq
+    assign(
+      paste0(stk, "_uncertainty.flq"),
+      FLQuant(1, dimnames=list(age="all", year=first.yr:last.yr, unit=1, season=1))
+    )
+    
+    rm(list = c("tmp1", "tmp2", "tmp3", "tmp4"))
+    
+  }
+  
+## build SRs
+SRs <- FLBEIA::create.SRs.data(
+    yrs = yrs,
+    ns = ns,
+    ni = ni,
+    stks.data = stks.data)
+```
+
+Now we replace the basic SRR in the `SRs-object` with our EMSRR. Basically, one needs to define a function-wrapper around our EMSRR, that takes `ssb` and the `covars` of our defined relationship as input and predicts recruitment accordingly. We need to stick to the `FLR` framework here, at least regarding the format of the input and output. I made the generation of those wrapper-functions somewhat generic that would allow to generate those easily for multiple stocks in a mixed fisheries setting, with the drawback of a little less human readability.
+
+```{r Replace wih the EMSRR model, message=F,warning=F,error=F}
+
+# modify the SR-relationship of North Sea demersal stocks to allow for including an externally fitted SR-relationship + env. covariate
+
+env.SR = TRUE # include EMSRRs
+if(env.SR == TRUE & (stk_name %in% emsrr.lut.stk$flbeia_stk)) {
+    
+  # ------------------------ #
+  # specify climate scenario
+  # ------------------------ #
+    
+    clim.scen = c("rcp45","rcp85")
+    
+    # -- load various SR models -- #  
+    
+    emsrrs = list.files("./data/EMSRRs/","*.RData")
+    
+    emsrr.names = sapply(emsrrs,function(x) load(file.path("./data/EMSRRs/",x),envir = .GlobalEnv))
+    # select stock
+    emsrr.names = emsrr.names[grepl(emsrr.lut.stk$stk[emsrr.lut.stk$flbeia_stk %in% stk_name],emsrr.names)]
+    stk_nms = as.vector(gsub(".EMSRR.*","",emsrr.names)) 
+    
+    # try to do the assign-stuff more generic
+    for(sr in 1:length(emsrr.names)){
+      emsrr.obj = get(emsrr.names[sr])
+      stk = stk_nms[sr]
+      # emsrr model & predict function
+      # define the predict function to match the name of the stock
+      assign(paste(stk,"rec.model",sep = "."),emsrr.obj$model$SR.model)
+      assign(paste(stk,"predict.func",sep = "."),emsrr.obj$model$predict.func)
+      env.vars = emsrr.obj$model$env.vars
+      
+      # create a function to make predictions
+      # (make it as generic as possible)
+      
+      # 1. create empty function
+      flbeia_sr_predict = function(ssb,stk,
+                                   dummy.param){}
+      # 2. set function arguments that specify the env. variables
+      formals(flbeia_sr_predict)[env.vars] <- NA
+      # 3. define (overwrite) the body of the function  
+      e <- expression(
+        
+        # get env. vars
+        fn.call <- names(as.list(match.call())),
+        env <- fn.call[!(fn.call %in% c("","ssb","dummy.param","stk"))],
+        env.data <- sapply(env,function(x) as.vector(get(x,envir = environment()))),
+        # convert to vector
+        new.data <- data.frame(ssb = as.vector(ssb),
+                               t(env.data)),
+        colnames(new.data) <- c("ssb",env),
+        print(new.data),
+        # get the specific predict.function & model for the stock
+        # look in the global environment outside the function (dangerous, careful here!!!)
+        predict.func <- get(paste(stk,"predict.func",sep = "."),envir = sys.parent(0)),
+        rec.model <- get(paste(stk,"rec.model",sep = "."),envir = sys.parent(0)),
+        new.rec <- predict.func(rec.model,newdata = new.data),
+        
+        # convert back to FLQuant-obj
+        new.rec <- FLQuant(as.vector(new.rec)),
+        return(new.rec)
+      ) 
+      # put into body of the function
+      body(flbeia_sr_predict,envir = environment(flbeia_sr_predict)) <- as.call(c(as.name("{"), e))
+      
+      # check 
+      #flbeia_sr_predict(ssb = 1E5,SST_YR_PC1_lag1 = -20,stk = "Cod")
+      # works
+      # define a specific name for the stock
+      assign(paste(stk,"flbeia_sr_predict",sep = "."),
+             flbeia_sr_predict)
+      
+      # write a function that is structured like the bevholt-function
+      Rec.function <- function(stk){
+        logl = NA
+        initial = NA
+        # get respective SRR-function
+        # look in the global environment, otherwise R cannot find the 
+        # respective function
+        flbeia_sr_predict <- get(paste(stk,"flbeia_sr_predict",sep = "."),
+                                 envir = sys.parent(0))
+        fn.str <- names(as.list(args(flbeia_sr_predict)))
+        fn.str <- fn.str[fn.str != ""]
+        # hardcode the stock name into the function arguments
+        fn.str[grep("stk",fn.str)] <- paste0("stk =","'",stk,"'")
+        
+        # search for the stock-specific predict function
+        fn.formula <- paste0(paste(stk, "flbeia_sr_predict", 
+                                   sep = "."), "(", paste(fn.str, 
+                                                          collapse = ", "), ")")
+        # put everything into formula
+        model = as.formula(paste("rec",fn.formula,sep = "~"))
+        return(list(logl = logl, model = model, initial = initial))
+      }
+      # set stk as fixed element in the function
+      formals(Rec.function)$stk = stk
+      assign(paste(stk,"Rec.function",sep = "."),Rec.function)
+      
+      # --------------------------------------------- # 
+      # replace everything relevant in the Cod-SR.obj:
+      # - set parameters to some unimportant dummy parameters
+      # - set name of the SR-relationship function
+      # - include covariate
+      # --------------------------------------------- #
+      
+      # dummy parameter
+      dummy.params = array(0,dim=c(1,length(first.yr:last.yr),1,1),dimnames=list(param=c("dummy.param"),year=as.character(first.yr:last.yr),
+                                                                                 season=1,iter=1))
+      
+      flbeia_stk = emsrr.lut.stk$flbeia_stk[emsrr.lut.stk$stk == stk]
+      #SRs$stk@params = dummy.params
+      SRs[[nameChange(flbeia_stk,"new")]]@params = dummy.params
+      #SRs[[flbeia_stk]]@params = dummy.params
+      # SR-relationship
+      #SRs$stk@model = paste(stk,"Rec.function",sep = ".")
+      SRs[[nameChange(flbeia_stk,"new")]]@model = paste(stk,"Rec.function",sep = ".")
+    }# end of defining the flbeia-related srr-functions
+    
+    
+    # covar-loop
+    SRs_rcp45 = SRs_rcp85 = SRs
+    # covar can only be included AFTER SR is already defined!
+    # use only the trends (without interannual variability)
+    for(sr in 1:length(emsrr.names)){
+      emsrr.obj = get(emsrr.names[sr])
+      stk = stk_nms[sr]
+      flbeia_stk = emsrr.lut.stk$flbeia_stk[emsrr.lut.stk$stk == stk]
+      for(rcp in clim.scen){
+        # create list with all covariates inside
+        
+        # mean of all realisations
+        env.proj = lapply(emsrr.obj$env.variables$climate.projections[[rcp]],
+                          function(x){
+                            years = x$year
+                            df = apply(x[,-which(names(x) %in% "year")],1,mean)
+                            names(df) <- years
+                            # extent to range up to first yr
+                            yrs_extent = first.yr:max(years)
+                            tmp = vector("numeric",length = length(yrs_extent))
+                            names(tmp) = yrs_extent
+                            tmp[yrs_extent %in% ac(years)] <- df
+                            return(tmp)})
+        covar.flq = FLQuants(lapply(env.proj,
+                                    function(x){
+                                      FLQuant(x,dimnames = list(year = names(x)))}))
+        # store in respective slot
+        if(rcp == "rcp45"){
+          #SRs_rcp45$stk@covar = covar.flq
+          SRs_rcp45[[nameChange(flbeia_stk,"new")]]@covar = covar.flq
+        } else if(rcp == "rcp85"){
+          #SRs_rcp85$stk@covar = covar.flq
+          SRs_rcp85[[nameChange(flbeia_stk,"new")]]@covar = covar.flq
+        }
+        rm(covar.flq)
+      }
+    } # end of covariate assignment loop
+    
+    # remove a few objects that were created in the process
+    rm(list = c("flbeia_sr_predict","Rec.function"))
+    
+  } 
+```
+
+### 3.6 Growth model
+
+Here we load in the growth model, which is a **linear-mixed model** fitted with `glmmTMB`, including an influence of **bottom temperature** and **bottom salinity** on growth.
+
+First we need to bring it in the format to use it within FLBEIA, so give it a specific name we refer to later on, when calling the model. Also if not calculated yet, we extract/calculate the unexplained residual noise, that we later use to create uncertainty around the predicted growth.
+
+```{r Growth Setup,message = F,error=F,warning=F}
+# ----------------------------------------- #
+# prepare growth model input
+  
+# load growth prediction function & modified ASPG-model
+source("./functions/growthModel_functions.R")
+  
+# data.frame with FLBEIA stock name and official ICES one
+# only those stocks that had a significant covariate (env. or ssb)
+model.lut = data.frame(stock = "COD-NS",
+                       code = "cod.27.47d20",
+                       method = "glmmTMB_AICc")
+for(i in 1:nrow(model.lut)){
+    tmp = model.lut[i,]
+    # get models
+    mod = paste(tmp$code,tmp$method,sep = "_")
+    name_mod = load(list.files("./data/growth_models/",mod,full.names = T))
+  if(length(name_mod)>1){
+      # check if gFit is in the model.obj
+      name_mod1 = name_mod[name_mod %in% "gFit"]
+      mod.obj = get(name_mod1)
+      # add other scaling parameters to the model object as vector
+      name_scaling = name_mod[!(name_mod %in% "gFit")]
+      scaling_pars = sapply(name_scaling,get)
+      # in the attributes of the model
+      attributes(mod.obj)$scaling = scaling_pars
+    } else{
+      mod.obj = get(name_mod)
+    }
+    # add residual noise to the model-object
+      resids = residuals(mod.obj)
+      if(length(resids) == 0){
+        pred = glmmTMB:::predict.glmmTMB(mod.obj)
+        obs = mod.obj$frame$logw2
+        resids = obs - pred
+      } 
+      df_residuals = data.frame(age = mod.obj$frame$age,log_resids = resids)
+      df_age_residuals = plyr::ddply(df_residuals,"age",plyr::summarise,
+                                     sd_residuals = sd(log_resids))
+      # add plusqroup noise as noise over all
+      sd_plusgroup = data.frame(age = max(df_age_residuals$age)+1,
+                                sd_residuals = sd(df_residuals$log_resids))
+      df_age_residuals = rbind(df_age_residuals,sd_plusgroup)
+      
+      mod.obj$residual_noise = df_age_residuals
+    # assign new name
+    model.lut$growth.model_stk[i] = mod
+    assign(mod,mod.obj)  
+  }
+  # rename columns
+  names(model.lut)[names(model.lut) == "method"] <- "growth.model"
+  # rename stock names
+  model.lut$stock = nameChange(model.lut$stock,"new")
+  
+  model.table = model.lut
+  
+```
+
+Including an explicit growth model does also affect natural mortality (m) and catchabilities (q). As the weights per age class increase or decrease, those fish are also less/more prone to predation due to the correlation of weight with size (smaller fish have higher predation pressure). Additionally based on the catchability profile of the specific fleet, lighter/heavier fish experience different vulnerability to fishing.
+
+The method presented here is more an ad-hoc correction based on interpolating the m and q profiles per age.
+
+```{r Growth influences on q and m, error=FALSE, message=FALSE, warning=FALSE}
+  # 7.2
+  # -------------------------------------------------------- #
+  # a more simple way handle updating catchability with growth
+  # interpolation of catchability via a linear approximation
+  # and sampling of years, so that the catchability for
+  # different stocks caught by this fleet varies together
+  # -------------------------------------------------------- #
+  
+  # 1. fit a curve to the selectivity curve of a year per stock, fleet and metier
+  # 2. sample from this
+  interpolate_q = function(df,wt_new,plot = F){
+    
+    require(colorspace)
+    
+    col.scale = sequential_hcl(n = length(unique(df$age)),
+                               palette = "Sunset_Dark")
+    
+    # fit a cuve to the selectivity by fleet, metier, year
+    
+    tmp1 = df
+    wt_new = sort(c(wt_new,tmp1$wt))  
+    pred = list();n = 1
+    if(plot == T){
+      plot(tmp1$wt,tmp1$q,col = col.scale[as.numeric(as.factor(tmp1$age))],pch = 16,cex = 2,
+           xlab = "weight",ylab = "q",xlim = range(wt_new))
+      text(tmp1$wt*1.05,tmp1$q*1.01,col = col.scale[as.numeric(as.factor(tmp1$age))],labels = tmp1$year)
+      abline(h = 0,lty = 2)
+    }
+    # loop
+    for(yr in unique(tmp1$year)){
+      input = tmp1
+      
+      # fit linear models to extrapolate beyond the range
+      input_yr = input[input$year == yr,]
+      
+      min.age = min(input_yr$age)
+      max.age = max(input_yr$age)
+      
+      low_extension = input_yr[input_yr$age %in% c(min.age,min.age+1),]
+      high_extension = input_yr[input_yr$age %in% c(max.age-1,max.age),]
+      
+      low.mod = lm(q~wt,low_extension)
+      high.mod = lm(q~wt,high_extension)
+      
+      # linear interpolation
+      q.linpol = approxfun(x = input_yr$wt,
+                           y = input_yr$q)
+      q_lin = data.frame(wt = wt_new,q = q.linpol(wt_new))
+      # linear extrapolation
+      indx_low = wt_new<low_extension$wt[low_extension$age == min.age]
+      q_lin$q[indx_low] <-predict(low.mod,data.frame(wt = wt_new[indx_low]))
+      indx_high = wt_new>high_extension$wt[high_extension$age == max.age]
+      q_lin$q[indx_high] <- predict(high.mod,data.frame(wt = wt_new[indx_high]))
+      q_lin$q = pmax(0,q_lin$q)
+      
+      pred[[n]] = data.frame(year = yr,q_lin)
+      #pred[[n]][,3] = pmax(0,pred[[n]][,3])
+      if(plot == T){
+        lines(pred[[n]][,c(2:3)],col = col.scale[],lwd = 2)
+      }
+      n = n+1}
+    pred_q = data.frame(do.call(rbind,pred))
+    names(pred_q) = c("year","wt","q")
+    return(pred_q)
+    
+  }
+  
+  # store interpolated catchability of all the stocks that are caught
+  # per metier and fleet
+  pb = txtProgressBar(min = 0, max = length(fleets), initial = 0) 
+  fleets_q = list()
+  yrs_avg = ac(2017:2021)
+  for(i in seq_along(fleets)){
+    flt = names(fleets)[i]
+    mts = names(fleets[[flt]]@metiers)
+    # create entry
+    fleets_q[[flt]] = list()
+    setTxtProgressBar(pb,i)
+    for(j in seq_along(mts)){
+      mt = mts[j]
+      fleets_q[[flt]][[mt]] = list()
+      
+      for(k in names(fleets[[flt]]@metiers[[mt]]@catches)){
+        
+        if(grepl("NEP",k)){
+          next()
+        } else {
+          age = as.numeric(dimnames(biols[[k]])$age)
+          tmp1 <- data.frame(age = age,m = as.vector(biols[[k]]@m[,yrs_avg,]),year = rep(yrs_avg,each = length(age)))
+          tmp2 <- data.frame(age = age,wt = as.vector(biols[[k]]@wt[,yrs_avg,]),year = rep(yrs_avg,each = length(age)))
+          
+          tmp1 <- merge(tmp1, tmp2,by = c("age","year"))
+          tmp2 <- data.frame(age = age,q = as.vector(fleets[[flt]]@metiers[[mt]]@catches[[k]]@catch.q[, yrs_avg]),
+                             year = rep(yrs_avg,each = length(age)))
+          tmp1 <- merge(tmp1, tmp2,by = c("age","year"))
+          
+          # define weight range to interpolate in 
+          wt_new = seq(
+            0,abs(0.4 * max(tmp1$wt)) + max(tmp1$wt), # interpolate between 0 and 140% of max.value
+            length.out = 500
+          )
+          
+          # remove years when all are all 0
+          yrs_allZeros = sapply(yrs_avg,function(yr) all(tmp1$q[tmp1$year == yr] == 0))
+          if(any(yrs_allZeros == T)){
+            yrs_zero = names(yrs_allZeros)[yrs_allZeros == T]
+            tmp1 = tmp1[!(tmp1$year %in% yrs_zero),]
+          }
+          
+          tmp1$age = as.numeric(tmp1$age)
+          
+          
+          # check extrapolation behaviour.... 
+          df =  interpolate_q(df = tmp1,wt_new = wt_new,plot = T)
+          
+          # store in a large list with a similar structure than the 
+          # fleet-obj    
+          fleets_q[[flt]][[mt]][[k]] = df    
+          close(pb)
+        }
+      }
+    }
+  }
+  
+  # -----------------------------------------------# 
+  # create the sampling of catchabilities from historical years 
+  
+  # sample available years within one fleet
+  # if a year is not available for one specific stock in a metier 
+  # use only available year
+  
+  set.seed(42)
+  fleets_q_yrs_sample = list()
+  
+  # create 100 different realisations
+  max.iter = 100
+  yrs = first.yr:last.yr
+  for(iter in 1:max.iter){
+    # draw a sample
+    q_sample = sample(as.numeric(yrs_avg),size = length(yrs),replace = T)
+    for(fl in names(fleets)){
+      yrs = first.yr:last.yr
+      # go through all metiers and stocks and see if this sample works or
+      # if for some metier and stock combinations some sample years need to be replaced 
+      # with available ones
+      mts = names(fleets_q[[fl]])
+      for(mt in mts){
+        stks = names(fleets_q[[fl]][[mt]])
+        for(stk in stks){
+          dat = fleets_q[[fl]][[mt]][[stk]]
+          available.yrs = as.numeric(unique(dat$year))
+          # initialise
+          if(iter ==1){
+            fleets_q_yrs_sample[[fl]][[mt]][[stk]] = vector(mode = "numeric")
+          }
+          
+          if(all(yrs_avg %in% available.yrs)){
+            fleets_q_yrs_sample[[fl]][[mt]][[stk]] = cbind(fleets_q_yrs_sample[[fl]][[mt]][[stk]],q_sample)
+          } else {
+            # check which years are not available
+            # and replace those by available years
+            q_sample_replace = q_sample
+            if(length(available.yrs) == 1){
+              q_sample_replace[!(q_sample %in% available.yrs)] <- available.yrs
+            } else {
+              q_sample_replace[!(q_sample %in% available.yrs)] <- sample(available.yrs,sum(!(q_sample %in% available.yrs)),replace = T)
+            }
+            fleets_q_yrs_sample[[fl]][[mt]][[stk]] = cbind(fleets_q_yrs_sample[[fl]][[mt]][[stk]],q_sample_replace)
+          }
+          if(iter == max.iter) {
+            fleets_q_yrs_sample[[fl]][[mt]][[stk]] = data.frame(fleets_q_yrs_sample[[fl]][[mt]][[stk]])
+            colnames(fleets_q_yrs_sample[[fl]][[mt]][[stk]]) = paste("iter",1:max.iter,sep = "_")
+          }
+        }  
+      }
+    }
+  }
+  
+  # ------------------------ # 
+  # update m based on growth
+  # ------------------------ #
+  library(cobs)
+  stks_m = list()
+  for(i in seq_along(biols)){
+    stk = names(biols)[i]
+    if(grepl("NEP",stk)){
+      next()
+    } else {
+      age = as.numeric(dimnames(biols[[i]])$age)
+      tmp1 <- data.frame(age = age,m = as.vector(biols[[i]]@m[,yrs_avg,]),year = rep(yrs_avg,each = length(age)))
+      tmp2 <- data.frame(age = age,wt = as.vector(biols[[i]]@wt[,yrs_avg,]),year = rep(yrs_avg,each = length(age)))
+      
+      tmp1 <- merge(tmp1, tmp2,by = c("age","year"))
+      # remove rows where all m and wt are zero
+      tmp1 = tmp1[tmp1$m != 0 & tmp1$wt != 0,]
+      
+      wt_new = seq(
+        min(tmp1$wt) - abs(0.4 * min(tmp1$wt)),
+        abs(0.4 * max(tmp1$wt)) + max(tmp1$wt),
+        length.out = 500
+      )
+      plot(tmp1$wt,tmp1$m,xlab = "weight",ylab = "m")
+      spl = cobs(x = tmp1$wt,y = tmp1$m)
+      pred_m = predict(spl,wt_new)
+      lines(pred_m,col = "red")  
+      abline(v = 0,lty = 2)
+      title(paste(nameChange(stk,"old"),
+                  "Natural Mort.",sep = ": "),adj = 0)
+      stks_m[[stk]] = data.frame(wt = pred_m[,1],
+                                   m = pred_m[,2])
+    }
+  }
+```
+
+Resampling of stock-recruitment weights for the growth function (as we do not model recruitment weights explicitly).
+
+```{r Resample recruitment weights}
+# 3.1 get recruitment weights -------------------------------------------
+# for growth
+# to resample those for later on
+
+growth_stks = c("COD_dash_NS")
+stocks_gr = list(stock)
+names(stocks_gr) = nameChange(stk_name,"new")[nameChange(stk_name,"new") %in% growth_stks]
+
+# get recruitment weights
+stocks_gr_recWgts = list()
+for(stk in seq_along(stocks_gr)){
+      
+stk_ad = stocks_gr[[stk]] 
+rec_wgts = data.frame(year = as.numeric(dimnames(stk_ad@stock.wt)$year),
+                            rec_wgt = as.numeric(stk_ad@stock.wt[1,]))
+# check which years are included in the eqsim-lut
+      yrs_resample = eqsim_lut[[nameChange(names(stocks_gr)[stk],"old")]]$bio_years
+# resample those defined in the eqsim-lut runs 
+stocks_gr_recWgts[[stk]] = rec_wgts[rec_wgts$year %in% yrs_resample,]
+}
+names(stocks_gr_recWgts) = names(stocks_gr)
+```
+
+```{r}
+
+# resample recruitment weights -------------------------------------------- 
+set.seed(42)
+stks_recWgts_sample = list()
+for (i in names(stocks_gr_recWgts)) {
+  for (j in 1:max.iter) {
+    rw = sample(
+      stocks_gr_recWgts[[i]]$rec_wgt,
+      size = length(first.yr:last.yr),
+      replace = T
+    )
+    if (j == 1) {
+      stks_recWgts_sample[[i]] = vector(mode = "numeric")
+      # add years as rownames
+      names(rw) = first.yr:last.yr 
+    }
+    stks_recWgts_sample[[i]] = cbind(stks_recWgts_sample[[i]], rw)
+    if (j == max.iter) {
+      stks_recWgts_sample[[i]] = data.frame(stks_recWgts_sample[[i]])
+      colnames(stks_recWgts_sample[[i]]) = paste("iter", 1:max.iter, sep = "_")
+    }
+  }
+}
+```
+
+The growth model gets called in a modified function `ASPG.growth` to simulate the age-based dynamics (the base-FLBEIA function is "ASPG" - Age-based-population-growth). In order for FLBEIA to know, which growth model and parameters to use we define the model lookup-table `model.table` as function argument to `ASPG.growth`. We also do it with the lookup-table for natural mortality `stk_m`. Changes in catchability due to growth need to be defined in the fleets OM, simulating the actual fleet behaviour. Therefore we defined a modified `SMFB`-function (Simple Mixed fisheries behaviour), `SMFB.growth`, where we now include the `fleets_q` lookup table (containing interpolated catchabilities per weight per year, and which get resampled during the simulation).
+
+```{r growth setup 2, message=F,error=F,warning=F}
+  # explicitly add the model lookup table to the function arguments of 
+  # the ASPG.growth function
+  formals(ASPG.growth)$model.table = model.table
+  # add function to update m
+  formals(update.m)$m_table = stks_m
+  # add element to smfb.growth function
+  formals(SMFB.growth)$fleets_q = fleets_q # the catchability curves
+```
+
+Now we prepare the growth covariates. As I mentioned earlier, we have bottom temperature and bottom salinity averaged over the ICES stock area influencing the growth of cod.
+
+We load an input object containing 100 time series per covariate for each RCP-scenario (RCP4.5 and RCP8.5). Those time series are bias-corrected and BVAR-generated (see previous tutorials) realisations of the POLCOMS-ERSEM regionally-downscaled climate projection for the North Atlantic.
+
+In order to have a "baseline" to compare to, we generate a 'noCC' or 'Current' climate scenario, where we remove the trend from the RCP4.5 scenario.
+
+```{r Prepare the growth Covars,message=F,warning=F,error=FALSE}
+
+  # prepare growth covar-objects #
+  # -------------------------------- #
+    load("./data/growth_covars/Stock_ICES.avg_projections.RData")
+
+  # restructure to have variables all under one projection 
+  # (temp & salt under rcp4.5)
+  stk_ices_avg_proj = list()
+  for(ii in seq_along(Stock_ICES.avg_projections)){
+    tmp = Stock_ICES.avg_projections[[ii]]
+    if(ii == 1){
+      stk_ices_avg_proj = tmp
+    } else {
+      for(jj in seq_along(tmp)){
+        stk_ices_avg_proj[[jj]] = merge(stk_ices_avg_proj[[jj]],tmp[[jj]],
+                                        by = "time")
+      }
+    }
+  }
+  
+  # create noCC runs by removing the long-term median 
+  # over all runs from each iteration
+  # based on rcp45
+  create.noCC = function(df){
+    # helper function
+    fast.noCC = function(time,dat){
+      med = apply(dat,1,median);
+      df = data.frame(time = time,dat - med + med[1]) # correction for the intercept
+      return(df)
+    }
+    # split df by stock | variable
+    nm = names(df)
+    vars = stringr::str_extract(pattern = "bottomT|SST|bottomSalt|surfaceSalt",
+                                string = nm)
+    vars = unique(na.omit(vars))
+    stks = stringr::str_extract(pattern = "COD",string = nm)
+    stks = unique(na.omit(stks))
+    n = 1
+    for(i in seq_along(vars)){
+      tmp1 = df[,grep(vars[i],nm)]
+      for(j in seq_along(stks)){
+        cat("Processing:","||",vars[i],"|",stks[j],"||","\n")
+        tmp2 = tmp1[,grep(stks[j],names(tmp1))]  
+        noCC.runs = fast.noCC(time = df$time,dat = tmp2)
+        if(n == 1){
+          noCC.runs_all = noCC.runs
+        } else{
+          noCC.runs_all = merge(noCC.runs_all,noCC.runs,by = "time") 
+        }
+        n = n+1
+      }
+    }
+    # rename
+    names(noCC.runs_all) <- gsub("rcp45|rcp85","noCC",names(noCC.runs_all))
+    return(noCC.runs_all)
+    
+  }
+  
+  # create noCC runs
+  stk_ices_avg_proj$noCC = create.noCC(df = stk_ices_avg_proj$rcp45)
+  
+  # extract per stock and variable
+  covars.df = lapply(stk_ices_avg_proj,function(x){
+    stk_lut = data.frame(stk.abbr = c("COD"),
+                         stkname = c("COD_dash_NS"))
+    x_melt = reshape2::melt(x,id.vars = "time")
+    x_melt$year = x_melt$time
+    x_melt$time <- NULL
+    # extract stock and variable
+    x_melt$var = stringr::str_extract(pattern = "bottomT|SST|bottomSalt|surfaceSalt",
+                                      string = x_melt$variable)
+    # rename var
+    x_melt$var = ifelse(x_melt$var == "bottomT","temp",
+                        ifelse(x_melt$var == "bottomSalt","sal",NA))
+    x_melt$stock = stringr::str_extract(pattern = "COD",
+                                        string = x_melt$variable)
+    # exchange with stock name used in FLBEIA
+    x_melt$stock = stk_lut$stkname[match(x_melt$stock,stk_lut$stk.abbr)] 
+    x_melt$iter = as.numeric(gsub(".*iter","",x_melt$variable))
+    # split by iteration
+    x_melt_split = split(x_melt,x_melt$iter)
+    return(x_melt_split)
+})
+# end of loading input relevant for stocks with explicit growth considered 
+```
+
+To pass the growth covariates to FLBEIA we need to convert those to `FLquant` objects. Therefore I made a few helper-functions.
+
+The `prep_GrowthEnv_covars`-function converts the prepared covariate data.frames to `FLQuants`. Similarly, I got a function `prep_Growth.Uncertainty.by.age_covars` that handles the `FLQuant` generation of the growth-model noise component. Additionally, a last function `prep_catchability_covars` handles the coersion of resampled catchabilites to a `FLQuant` object.
+
+It is a bit of an overkill here and rather inflates the code, but trust me, if you got a bunch of stocks (which you definitely have in a mixed fisheries setting), it comes quite in handy...
+
+```{r Prepare functions to handle Growth covars,message=F,warning=F,error=F}
+# function to prepare covars object
+prep_GrowthEnv_covars = function(df, first.yr,last.yr){
+    # convert a data.frame to an flquants file
+    # 0. restrict to specific time
+    df = df[df$year >= first.yr & df$year <= last.yr,]
+    # 1. create list
+    tmp = split(df,f = df[,c("var","stock")])
+    # remove empty objects
+    indx.NULL = which(sapply(tmp,nrow) == 0)
+    if(length(indx.NULL) >= 1){
+      tmp[indx.NULL] <- NULL
+    }  
+    # if the first.yr lies before the extent of the covariate, just
+    # extent with NAs
+    if(min(df$year) > first.yr){
+      tmp = lapply(tmp,function(x){
+        extent.yrs = first.yr:(min(x$year)-1)
+        x = x[order(x$year),]
+        x_extent = x[1:length(extent.yrs),]
+        x_extent$year = extent.yrs
+        x_extent$value = NA
+        x = rbind(x_extent,x)
+        return(x)
+      })
+    }
+    
+    covars = FLCore::FLQuants(lapply(tmp, function(x) {
+      FLCore::FLQuant(x$value, dimnames = list(year = x$year))
+    }))
+    return(covars)
+  }
+  
+  # function to create covars to add uncertainty to the weight-at-age-relationship
+  prep_Growth.Uncertainty.by.age_covars = function(df, first.yr,last.yr){
+    # convert a data.frame to an flquants file
+    # 0. restrict to specific time
+    df = df[df$year >= first.yr & df$year <= last.yr,]
+    # 1. create list
+    tmp = split(df,f = df[,c("var","stock")])
+    # remove empty objects
+    indx.NULL = which(sapply(tmp,nrow) == 0)
+    if(length(indx.NULL) >= 1){
+      tmp[indx.NULL] <- NULL
+    }  
+    # if the first.yr lies before the extent of the covariate, just
+    # extent with NAs
+    if(min(df$year) > first.yr){
+      tmp = lapply(tmp,function(x){
+        extent.yrs = first.yr:(min(x$year)-1)
+        x_extent = x[1:length(extent.yrs),]
+        x_extent$year = extent.yrs
+        x_extent$value = NA
+        
+        x = rbind(x_extent,x)
+        return(x)
+      })
+    }
+    
+    covars = FLCore::FLQuants(lapply(tmp, function(x) {
+      # sort x by age and year
+      x = x[order(x$age, x$year, decreasing = F), ]
+      # produce FLQuant
+      FLCore::FLQuant(
+        matrix(
+          x$value,
+          nrow = length(unique(x$age)),
+          ncol = length(unique(x$year)),
+          byrow = T
+        ),
+        dimnames = list(age = unique(x$age), year = unique(x$year))
+      )
+    }))
+    return(covars)
+  }
+  
+  # function to prepare covar for selectivity resampling
+  prep_catchability_covars = function(flt_mt_stk_list,years){
+    flat_list = marmalaid::flatten.list(flt_mt_stk_list)
+    names(flat_list) = paste("q",names(flat_list),sep = "_")
+    covars = FLCore::FLQuants(lapply(flat_list, function(x) {
+      FLCore::FLQuant(x, dimnames = list(year = years))
+    }))
+    return(covars)  
+  }
+  
+```
+
+### 3.7 Advice-obj.
+
+Build advice (a list-object):
+
+-   contains info on management advice
+-   'TAC' & quota shares
+
+```{r Build advice}
+  # 5. Build advice ---------------------------------------------------------------
+  
+  general_proj.ave.years <- proj.yr-1
+  Ltmp <- vector("list", length(biols))
+  names(Ltmp) <- names(biols)
+  for(i in seq(biols)){
+    stk <- names(biols)[i]
+    
+    tmp2 <- expand.grid(
+      stock=stk, year=first.yr:last.yr, unit="unique", season="all",
+      area="unique", iter=seq(ni),
+      data=NA
+    )
+    
+    catch <- 0 * (fleets[[1]]@metiers[[1]]@catches[[1]]@landings + fleets[[1]]@metiers[[1]]@catches[[1]]@discards)
+    for(fl in seq(fleets)){
+      for(met in seq(fleets[[fl]]@metiers)){
+        if(stk %in% names(fleets[[fl]]@metiers[[met]]@catches)){
+          catch <- catch + (fleets[[fl]]@metiers[[met]]@catches[[stk]]@landings + fleets[[fl]]@metiers[[met]]@catches[[stk]]@discards)
+        }
+        print(paste("fleet", fl, "; metier", met, "; stk", i, "is done"))
+      }
+    }
+    # input TAC for proj.yrs (only first will be used)
+    catch[,ac(proj.yr)] <- catch[,ac(general_proj.ave.years)]
+    
+    # Assign TAC
+    tmp3 <- tmp2
+    tmp3$data <- c(catch)
+    assign(paste0(names(biols)[i], "_advice.TAC.flq"), iter(as.FLQuant(tmp3), ni) )
+    
+    # Assign advice average years
+    assign(paste0(names(biols)[i], "_advice.avg.yrs"), c(general_proj.ave.years))
+    
+    # Add names of created objects
+    Ltmp[[i]] <- paste0(stk, c("_advice.TAC.flq", "_advice.avg.yrs") )
+    Ltmp[[i]] <- paste0(stk, c("_advice.TAC.flq") )
+    
+  }
+  
+  stks <- names(biols)    
+  advice   <- create.advice.data(
+    yrs = unlist(list("first.yr" = first.yr, "proj.yr" = proj.yr,"last.yr" = last.yr)),
+    ns = ns,
+    ni = ni,
+    stks.data = Ltmp,
+    fleets = fleets
+  )
+```
+
+### 3.8 Ctrl-objects
+
+Build the control-objects, which define the boundary conditions and work as pointer for the functions called in the operating model, observation model and management procedure.
+
+```{r Build control-objects}
+  
+  # 6. Build main.ctrl ------------------------------------------------------------
+  
+  main.ctrl           <- list()
+  main.ctrl$sim.years <- c(initial = proj.yr, final = last.yr)
+  
+  
+  # 7. Build biols.ctrl -----------------------------------------------------
+  
+  biols.ctrl <- create.biols.ctrl(stksnames=names(biols), growth.model="ASPG")
+  
+  # add environmentally influenced growth/changes in growth in the simulations
+  gr_stks = c("COD_dash_NS")
+  
+  # add manually in biols.ctrl for those stocks that have an explicit growth implementation
+  if(nameChange(stk_name,"new") %in% gr_stks){
+    biols.ctrl[[nameChange(stk_name,"new")]]$growth.model <- "ASPG.growth"
+  }
+  
+  # 8. Build fleets.ctrl ----------------------------------------------------
+  
+  # 8.1. n.fls.stks ---------------------------------------------------------
+  # number of stocks fished by each fleet
+  n.fls.stks <- NaN*seq(fleets)
+  for(i in seq(fleets)){
+    n.fls.stks[i] <- length(unique(unlist(lapply(fleets[[i]]@metiers, FUN = function(x){names(x@catches)}))))
+  }
+  
+  
+  # 8.2. fls.stksnames ------------------------------------------------------
+  # stocks fished by each fleet (in one long vector)
+  fls.stksnames <- vector(mode = "list", length(fleets))
+  for(i in seq(fleets)){
+    stksnames <- c()
+    for(j in seq(fleets[[i]]@metiers)){
+      stksnames <- c(stksnames, names(fleets[[i]]@metiers[[j]]@catches))
+    }
+    fls.stksnames[[i]] <- unique(stksnames)
+  }
+  fls.stksnames <- do.call("c", fls.stksnames)
+  
+  # compare
+  sum(n.fls.stks); length(fls.stksnames)
+  sum(do.call("c", lapply(fleets, FUN = function(x){length(x@metiers)})))
+  
+  
+  # 8.3. effort.models ------------------------------------------------------
+  
+  effort.models    <- rep('SMFB', length(fleets)) # SMFB: Simple Mixed Fisheries Behavior
+  # effort.models    <- rep('fixedEffort', length(fleets)) # fixedEffort: Fixed Effort model
+  
+  
+  # 8.4. catch.models -------------------------------------------------------
+  catch.models <- 'CobbDouglasAge'
+  
+  
+  # 8.5. capital.models -----------------------------------------------------
+  capital.models   <- rep('fixedCapital', length(fleets))
+  
+  
+  # 8.6. price.models -------------------------------------------------------
+  price.models     <- NULL                            
+  
+  Ltmp <- vector("list", length(biols))
+  names(Ltmp) <- names(biols)
+  stks <- names(biols)
+  for(i in seq(biols)){
+    Ltmp[[i]] <- paste0(stks[i], ".unit")
+    DIMS <- dims(biols[[i]])
+    assign(paste0(stks[i], ".unit"), DIMS$unit)
+  }
+  
+  
+  # 8.7. create --------------------------------------------------------
+  
+  flq <- FLBEIA:::create.list.stks.flq(
+    stks = stks,
+    yrs = unlist(list("first.yr" = first.yr, "proj.yr" = proj.yr,"last.yr" = last.yr)),
+    ni = ni,
+    ns = ns,
+    list.stks.unit = Ltmp
+  )[[1]][,,1,]
+  
+  # flq              <- create.list.stks.flq()[[1]][,,1,]
+  
+  fls <- names(fleets)
+  stknames <- names(biols)
+  fleets.ctrl      <- create.fleets.ctrl(
+    fls=fls, n.fls.stks=n.fls.stks, fls.stksnames=fls.stksnames,
+    effort.models=effort.models, catch.models=catch.models,
+    capital.models=capital.models, price.models=price.models, flq=flq
+  )
+  
+  # change SMFB to SMFB.growth
+  for(flt in names(fleets)){
+    # without updating catchabilities
+    fleets.ctrl[[flt]]$effort.model = "SMFB.growth"
+  }
+  # 8.8. restrictions -----------------------------------------
+  current_stocks.restr <- nameChange(stk_name,"new") #c("stk")
+  
+  for(fl in names(fleets)){
+    fleets.ctrl[[fl]]$restriction <- "catch"
+    fleets.ctrl[[fl]]$effort.restr <- "min"
+    # tmp <- vector("list", length(fleets[[fl]]@metiers))
+    fleets.ctrl[[fl]]$stocks.restr <- unique(do.call("c", lapply(fleets[[fl]]@metiers, 
+                                                                 FUN = function(x){names(x@catches)})))
+    fleets.ctrl[[fl]]$stocks.restr <- fleets.ctrl[[fl]]$stocks.restr[
+      fleets.ctrl[[fl]]$stocks.restr %in% current_stocks.restr]
+  }
+  
+  # 9. Build advice.ctrl ----------------------------------------------------------
+  
+  # 9.1. HCR.models ---------------------------------------------------------
+  
+  HCR.models    <- 'IcesHCR'
+  
+  # 9.2. create --------------------------------------------------------------
+  
+  advice.ctrl <- create.advice.ctrl(
+    stksnames = names(biols), 
+    HCR.models = HCR.models, 
+    first.yr = first.yr, 
+    last.yr = last.yr, 
+    iter = ni
+  )
+  
+  # 9.3. adjust -------------------------------------------------------------
+  
+  BRPs <- cbind(data.frame(stock_name = nameChange(rownames(BRPs), form = "new")), BRPs)
+  
+  for(i in seq(biols)){
+    advice.ctrl[[names(biols[i])]]$nyears <- 3
+    advice.ctrl[[nameChange(stk_name,"new")]]$wts.nyears = 3
+    advice.ctrl[[nameChange(stk_name,"new")]]$fbar.nyears = 3
+    # recruitment forecast in management routine based on 5yr-avg geometric mean
+    advice.ctrl[[nameChange(stk_name,"new")]]$sr$years = c(y.rm = 0, num.years = 5) # 5 year  geometric mean
+    AdvCatch <- as.logical(seq(first.yr:last.yr)*TRUE)
+    names(AdvCatch) <- first.yr:last.yr
+    advice.ctrl[[names(biols[i])]]$AdvCatch <- AdvCatch # TAC is given in terms of catch, if TRUE, or landings, if FALSE
+    if(!is.null(advice.ctrl[[names(biols[i])]]$ref.pts)){
+      advice.ctrl[[names(biols[i])]]$ref.pts["Blim",] <- 0 #subset(BRPs, stock_name == names(biols[i]))$Blim
+      advice.ctrl[[names(biols[i])]]$ref.pts["Btrigger",] <- subset(BRPs, stock_name == names(biols[i]))$Btrigger
+      advice.ctrl[[names(biols[i])]]$ref.pts["Fmsy",] <- subset(BRPs, stock_name == names(biols[i]))$Fmsy
+      advice.ctrl[[names(biols[i])]]$intermediate.year <- "Fsq"
+    }
+  }
+  
+  advice.ctrl[[nameChange(stk_name)]]
+  
+  # 10. Build assess.ctrl ---------------------------------------------------
+  
+  assess.models    <- rep('NoAssessment',length(biols))    
+  assess.ctrl      <- create.assess.ctrl(stksnames = names(biols), assess.models = assess.models)
+  
+  # 11. Build obs.ctrl ------------------------------------------------------
+  
+  stkObs.models    <- rep('perfectObs', length(biols)) # use NoObsStock?
+  obs.ctrl         <- create.obs.ctrl(stksnames = names(biols),  stkObs.models = stkObs.models)
+  
+  # 12. Build covars.ctrl ---------------------------------------------------
+  
+  covars.ctrl      <- NULL
+  
+  
+  # 13. Build BDs ------------------------------------------------------
+  
+  BDs <- NULL
+  
+  # 14. Build covars --------------------------------------------------------
+  
+  covars <- NULL
+  
+  # 15. Build indices -------------------------------------------------------
+  
+  indices <- NULL
+  
+ # end of conditioning
+# ----------------------------------------------------------------------
+```
+
+## 4. FLBEIA Simulation
+
+Based on the conditioned model, we can now set up the simulation.
+
+### 4.1 Global simulation settings
+
+```{r Prepare Simulation}
+# ====================== # 
+# Simulation preperation
+# ====================== #
+
+# # load EMSRR models -------------------------------------------------------
+emsrr.names =sapply(list.files("./data/EMSRRs/","*.RData|*.Rdata",full.names = T),
+                    load,envir = .GlobalEnv)
+stk_nms = as.vector(gsub(".EMSRR.*","",emsrr.names)) 
+emsrr_lut = data.frame(stk_long = stk_nms,
+                       stk_flbeia = ifelse(stk_nms == "Cod","COD-NS",NA),
+                       model.obj = emsrr.names)
+
+# load parameter uncertainty of EMSRRs ------------------------------------
+
+load("./data/EMSRR.models_boot.Rdata")
+emsrr_stks = names(EMSRRs_boot)
+
+# global simulation settings --------------------------------------------
+stochastic_sr <- TRUE
+stochastic_bio <- TRUE
+stochastic_sel <- TRUE
+
+# start of loop through stocks ---------
+
+# set stocks that are influenced by growth changes
+growth_stks = grep("COD",names(eqsim_lut),value = T)
+
+# trim eqsim_lut
+eqsim_lut = eqsim_lut[names(eqsim_lut) %in% unique(c(growth_stks,emsrr_stks))]
+# create a lookup table showing, which stocks have growth / emsrr
+growth_emsrr_lut = data.frame(stock = names(eqsim_lut))
+growth_emsrr_lut$growth = ifelse(growth_emsrr_lut$stock %in% growth_stks,TRUE,FALSE)
+growth_emsrr_lut$emsrr = ifelse(growth_emsrr_lut$stock %in% emsrr_stks,TRUE,FALSE)
+
+stk_gr_emsrr = growth_emsrr_lut[growth_emsrr_lut$stock == stk_name,]
+stk_long = emsrr_lut$stk_long[emsrr_lut$stk_flbeia == stk_name]
+
+# specify scenarios and number of cores -----------------------------------
+
+# update.m = update natural mortality with m ~ stock.w relationship
+# update.q = update catchability with q ~ stock.w relationship
+# det = deterministic (i.e. no uncertainty on recruitment)
+# growth - dynamic growth
+# emsrr - explicit environmental SRR
+# iter = iteration number
+  
+  # run only 1 iteration of those three scenarios
+  scen <- expand.grid(update.q = T,
+                      fleets.ctrl = c("min"),
+                      hcr = c("IcesHCR"),
+                      growth = stk_gr_emsrr$growth,
+                      emsrr = stk_gr_emsrr$emsrr,
+                      clim.scen = c("noCC","rcp45","rcp85"),
+                      iter = 1:10) # only 1 iteration as an example
+  
+rownames(scen) <- seq(nrow(scen))
+
+head(scen)
+
+# add a scenario name  
+ scen$name <- paste0("q_", scen$update.q, "~",
+                     "det_", scen$det, "~",
+                     "growth",scen$growth,"~",
+                     "emsrr",scen$emsrr,"~",
+                     "clim_",scen$clim.scen,"~",
+                     "iter", scen$iter)
+  
+  (niter <- length(scen$name))
+
+# load data -------------------------------------------------------------
+ 
+  RANGE <- range(stock)
+  yr.now = RANGE["maxyear"]
+  yr.TACp1 <- yr.now + 1
+  last.yr <- 2061 
+  proj.yrs <- ac(an(proj.yrs[1]):last.yr)
+  
+  # make sure catch threshold can't completely deplete stock
+  fleets.ctrl$catch.threshold[] <- 0.95
+  
+  # truncate biols to have a smaller extent corresponding to the newly set "last.yr"
+  biols = FLCore::window(biols,end = last.yr)
+  # truncate fleets object
+  fleets = FLCore::window(fleets,end = last.yr)
+```
+
+### 4.2 Setup Uncertainty
+
+Define uncertainty (resampling of historical biological parameters, but also environmental variability from the projections).
+
+```{r Uncertainty specification}
+  # define uncertainty, selectivity, and biological values for each  --------
+  uiter <- unique(scen$iter)
+  set.seed(987654 + which(names(eqsim_lut) == stk_name)) # otherwise each stock gets the same set of stochasticity
+  
+  if(stk_gr_emsrr$emsrr == TRUE){
+    
+    srr_pars = EMSRRs_boot[[stk_name]]$srr_pars_boot
+    
+    # subset srr_pars
+    indx_draws = sample(1:nrow(srr_pars),length(uiter),replace = F)
+    srr_pars_sub <- srr_pars[indx_draws,]
+    
+    # SR uncertainty
+    flq <- SRs_rcp45[[nameChange(stk_name,"new")]]@uncertainty
+    DIM <- dim(flq)
+    DIMNAMES <- dimnames(flq)
+    DIM[6] <- length(uiter)
+    DIMNAMES[[6]] <- ac(uiter)
+    SR_uncertainty <- FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+    for(i in uiter){
+      SR_uncertainty[, proj.yrs,,,,i] <- rlnorm(n = length(proj.yrs), meanlog = 0, sdlog = srr_pars_sub$cv[i])
+    }
+    model_obj_sub = EMSRRs_boot[[stk_name]]$srr_fit_boot[indx_draws]
+    
+# ------------------------------------ #
+# create/add noCC-run to the emsrr.obj
+# ------------------------------------ #
+    tmp.emsrr.obj = get(emsrr_lut$model.obj[emsrr_lut$stk_flbeia == stk_name])
+    tmp.emsrr.obj$env.variables$climate.projections$noCC <- tmp.emsrr.obj$env.variables$climate.projections$rcp45
+    tmp.emsrr.obj$env.variables$climate.projections$noCC = lapply(tmp.emsrr.obj$env.variables$climate.projections$noCC,
+                                                                  function(x){
+                                                                    med = apply(x[,-1],1,median);
+                                                                    df = data.frame(year = x[,1],x[,-1] - med + med[1]) # correction for the intercept
+                                                                    return(df)
+                                                                  })
+    for(i in 1:length(tmp.emsrr.obj$env.variables$climate.projections$noCC)){
+      mat.plot(tmp.emsrr.obj$env.variables$climate.projections$rcp45[[i]],col = alpha("orange",0.5),lwd = 2,
+               ylab = "",xlab = "year",
+               ylim = range(sapply(tmp.emsrr.obj$env.variables$climate.projections,
+                                   function(x) range(x[[i]][,-1]))))
+      mat.plot(tmp.emsrr.obj$env.variables$climate.projections$rcp85[[i]],col = alpha("red",0.3),add = T,lwd = 2)
+      mat.plot(tmp.emsrr.obj$env.variables$climate.projections$noCC[[i]],col = alpha("gray50",0.2),add = T,lwd = 2)
+      title(names(tmp.emsrr.obj$env.variables$climate.projections$noCC)[i],adj = 0)
+    }
+    # assign again
+    assign(emsrr_lut$model.obj[emsrr_lut$stk_flbeia == stk_name],
+           value = tmp.emsrr.obj)
+  } else {
+    # subset srr_pars
+    freq.model = table(srr_pars$model.fslr)/sum(table(srr_pars$model.fslr))
+    draws_each_model = round(freq.model*length(uiter))
+    if(sum(draws_each_model) != length(uiter)){
+      rest = sum(draws_each_model) - length(uiter)
+      if(rest > 0){
+        # remove from majority class
+        max.class = draws_each_model[which(draws_each_model == max(draws_each_model))]
+        draws_each_model[which(draws_each_model == max(draws_each_model))] = max.class - rest
+      } else {
+        # add to minority class
+        min.class = draws_each_model[which(draws_each_model == min(draws_each_model))]
+        draws_each_model[which(draws_each_model == min(draws_each_model))] = min.class + rest
+      }
+    }
+    
+    srr_pars_sub <- vector("list", length(freq.model))
+    for(i in seq(srr_pars_sub)){
+      if(draws_each_model[i] > 0){
+        # subset of model i
+        srr_pars_sub[[i]] <- subset(srr_pars, model.fslr == names(draws_each_model[i]))
+        # trim to desired length
+        srr_pars_sub[[i]] <- srr_pars_sub[[i]][seq(draws_each_model[i]),]
+      }
+    }
+    srr_pars_sub <- do.call("rbind", srr_pars_sub)
+    
+    # SR uncertainty
+    flq <- SRs[[nameChange(stk_name)]]@uncertainty
+    DIM <- dim(flq)
+    DIMNAMES <- dimnames(flq)
+    DIM[6] <- length(uiter)
+    DIMNAMES[[6]] <- ac(uiter)
+    SR_uncertainty <- FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+    for(i in uiter){
+      SR_uncertainty[, proj.yrs,,,,i] <- rlnorm(n = length(proj.yrs), meanlog = 0, sdlog = srr_pars_sub$cv[i])
+    }
+  }
+  
+if(stk_gr_emsrr$growth == TRUE){
+# add uncertainty/noise to the fitted growth relationship
+set.seed(42)
+# build a covariate df that can be used by the prep.GrowthEnv_covars function
+    n = 1; wt_noise = list()
+    for(m in 1:nrow(model.table)){
+      gr.mod = model.table$growth.model_stk[m]
+      stk = model.table$stock[m]
+# get sd of the additional noise for the weight-at-age model
+      wt.uncertainty = get(gr.mod)$residual_noise
+      for(it in uiter){
+        for(a in wt.uncertainty$age){
+          sd_log = wt.uncertainty$sd_residuals[wt.uncertainty$age == a]
+          noise.out = rlnorm(length(first.yr:last.yr),meanlog = 0,sdlog = sd_log)
+          df.wt.noise = data.frame(age = a,iter = it,var = "wt.uncertainty",
+                                   year = first.yr:last.yr,
+                                   stock = stk,
+                                   value = noise.out)
+          wt_noise[[n]] = df.wt.noise
+          n = n+1
+        }
+      }
+    }
+    wt.noise.per.stk = do.call(rbind,wt_noise)
+  }
+  
+  # catchability / selectivity resampling
+  flq <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@catch.q
+  DIM <- dim(flq)
+  DIMNAMES <- dimnames(flq)
+  DIM[6] <- length(uiter)
+  DIMNAMES[[6]] <- ac(uiter)
+  catch.q_new <- FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+  if(!eqsim_lut[[stk_name]]$sel_const){ # sample years if not const mean value used
+    for(i in uiter){
+      samp.yrs <- sample(x = eqsim_lut[[stk_name]]$sel_years, size = length(proj.yrs), replace = T)
+      catch.q_new[, proj.yrs,,,,i] <- flq[,ac(samp.yrs)]
+    }
+  }else{ # const mean value used
+    for(i in uiter){
+      mean.yrs <- eqsim_lut[[stk_name]]$sel_years
+      catch.q_new[, proj.yrs,,,,i] <- apply(flq[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+    }
+  }
+  
+    # ind weight (stock, landings, discards)
+  # incl mat? m?
+  flq <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt
+  DIM <- dim(flq)
+  DIMNAMES <- dimnames(flq)
+  DIM[6] <- length(uiter)
+  DIMNAMES[[6]] <- ac(uiter)
+  m_new <- mat_new <- stock.wt_new <- 
+    landings.wt_new <- discards.wt_new <- 
+    landings.sel_new <- discards.sel_new <- 
+    FLQuant(1, dim = DIM, dimnames = DIMNAMES)
+  
+  if(!eqsim_lut[[stk_name]]$bio_const){ # sample years if not const mean value used
+    for(i in uiter){
+      samp.yrs <- sample(x = eqsim_lut[[stk_name]]$bio_years, size = length(proj.yrs), replace = T)
+      
+      mat_new[, proj.yrs,,,,i] <- biols[[nameChange(stk_name)]]@mat$mat[,ac(samp.yrs)]
+      m_new[, proj.yrs,,,,i] <- biols[[nameChange(stk_name)]]@m[,ac(samp.yrs)]
+      stock.wt_new[, proj.yrs,,,,i] <- biols[[nameChange(stk_name)]]@wt[,ac(samp.yrs)]
+      
+      landings.wt_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt[,ac(samp.yrs)]
+      discards.wt_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.wt[,ac(samp.yrs)]
+      landings.sel_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.sel[,ac(samp.yrs)]
+      discards.sel_new[, proj.yrs,,,,i] <- fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.sel[,ac(samp.yrs)]
+    }
+  }else{ # const mean value used
+    for(i in uiter){
+      mean.yrs <- eqsim_lut[[stk_name]]$bio_years
+      
+      mat_new[, proj.yrs,,,,i] <- apply(biols[[nameChange(stk_name)]]@mat$mat[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+      m_new[, proj.yrs,,,,i] <- apply(biols[[nameChange(stk_name)]]@m[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+      stock.wt_new[, proj.yrs,,,,i] <- apply(biols[[nameChange(stk_name)]]@wt[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+      
+      landings.wt_new[, proj.yrs,,,,i] <- apply(fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+      discards.wt_new[, proj.yrs,,,,i] <- apply(fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.wt[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+      landings.sel_new[, proj.yrs,,,,i] <- apply(fleets[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.sel[,ac(mean.yrs)], MARGIN = c(1,3,4,5,6), mean, na.rm = TRUE)
+      discards.sel_new[, proj.yrs,,,,i] <- 1-landings.sel_new[, proj.yrs,,,,i]
+    }
+  }
+```
+
+### 4.3 Setup simulation function
+
+Definition of the simulation function that gets executed in parallel:
+
+```{r Setup the simulation function for parallelization}
+  # parallel execution function -----
+  parFun <- function(x){
+    library(FLBEIA)
+    
+    # scen info
+    scen.x <- scen[x,]
+    iter.x <- scen.x$iter
+    rcp.x <- as.character(scen.x$clim.scen)
+    gr = scen.x$growth
+    envR = scen.x$emsrr
+    
+    # update main ctrl
+    main.ctrl.x <- main.ctrl
+    main.ctrl.x$sim.years["final"] <- last.yr
+    
+    # update target F/HCR-model
+    advice.ctrl.x <- advice.ctrl
+    advice.ctrl.x[[nameChange(stk_name,"new")]]$HCR.model <- ac(scen.x$hcr)
+    
+    # update srr and add uncertainty if stochastic scenario
+    set.seed(12345 + iter.x) 
+    if(rcp.x %in% c("rcp45","noCC") & envR == T){
+      SRs.x <- SRs_rcp45
+    } else if(rcp.x == "rcp85" & envR == T){
+      SRs.x <- SRs_rcp85
+    } else {
+      SRs.x <- SRs
+      SRs.x[[1]]@model <- srr_pars_sub$model.fslr[iter.x]
+      SRs.x[[1]]@params["a",,,] <- srr_pars_sub$a[iter.x]
+      SRs.x[[1]]@params["b",,,] <- srr_pars_sub$b[iter.x]
+    }
+    
+    if(envR == T){
+      # ---------------------------------------------- #
+      # use the bootstrapped model as prediction model
+      # for the EMSRR to include parameter uncertainty
+      # ---------------------------------------------- #
+      
+      assign(paste0(emsrr_lut$stk_long[emsrr_lut$stk_flbeia == stk_name],".rec.model"),
+             model_obj_sub[[iter.x]])
+      
+      # ---------------------------------- #
+      # change the covars in the SR-object
+      # ---------------------------------- #
+      # replace the stored mean over all iterations 
+      # with the specified climate scenario run
+      
+      if(stk_name %in% emsrr_lut$stk_flbeia){
+        # get the emsrr fitted model object with the stored covariates
+        emsrr.obj = get(emsrr_lut$model.obj[emsrr_lut$stk_flbeia == stk_name])
+        env.vars = emsrr.obj$env.variables$climate.projections[[rcp.x]]
+        # put into respective slots
+        for(nn in names(SRs.x[[nameChange(stk_name,"new")]]@covar)){
+          years = as.numeric(dimnames(SRs.x[[nameChange(stk_name,"new")]]@covar[[nn]])$year)
+          # replace covars
+          SRs.x[[nameChange(stk_name,"new")]]@covar[[nn]][,as.character(years) %in% env.vars[[nn]]$year,] = env.vars[[nn]][env.vars[[nn]]$year %in% years,iter.x+1]
+        }
+      }
+    }
+    
+    # other objects
+    fleets.x <- fleets
+    biols.x <- biols
+    biols.ctrl.x = biols.ctrl
+    fleets.ctrl.x = fleets.ctrl
+    # update resampled slots if stochastic sim
+    
+    # SR uncertainty
+    if(stochastic_sr){
+      SRs.x[[1]]@uncertainty[, proj.yrs] <- SR_uncertainty[, proj.yrs,,,,iter.x]
+    }
+    
+    # selectivity
+    if(stochastic_sel){
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@catch.q[,proj.yrs] <- catch.q_new[, proj.yrs,,,,iter.x]
+    }
+    
+    # bio
+    if(stochastic_bio){
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.wt[,proj.yrs] <- landings.wt_new[, proj.yrs,,,,iter.x]
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.wt[,proj.yrs] <- discards.wt_new[, proj.yrs,,,,iter.x]
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@landings.sel[,proj.yrs] <- landings.sel_new[, proj.yrs,,,,iter.x]
+      fleets.x[["fl1"]]@metiers[["mt1"]]@catches[[nameChange(stk_name)]]@discards.sel[,proj.yrs] <- discards.sel_new[, proj.yrs,,,,iter.x]
+      
+      biols.x[[nameChange(stk_name)]]@wt[,proj.yrs] <- stock.wt_new[, proj.yrs,,,,iter.x]
+      biols.x[[nameChange(stk_name)]]@mat$mat[,proj.yrs] <- mat_new[, proj.yrs,,,,iter.x]
+    }
+    
+    if(gr){
+      # ------------------------ #
+      # update covars for growth
+      # ------------------------ #
+      
+      # create FLQuant based on iteration and rcp-scenario
+      covars.GrowthEnv = prep_GrowthEnv_covars(covars.df[[rcp.x]][[iter.x]],
+                                               first.yr = first.yr,
+                                               last.yr = last.yr)
+      
+      # draw a q sample
+      fleets_q_yrs_draw = list()
+      for(flt in names(fleets_q_yrs_sample)){
+        mts = names(fleets_q_yrs_sample[[flt]])
+        for(mt in mts){
+          stks = names(fleets_q_yrs_sample[[flt]][[mt]])  
+          for(stk in stks){
+            # the sampled interannual catchability 
+            fleets_q_yrs_draw[[flt]][[mt]][[stk]] = fleets_q_yrs_sample[[flt]][[mt]][[stk]][,iter.x]
+          }
+        }
+      }
+      
+      covars_catchability = prep_catchability_covars(fleets_q_yrs_draw,years = first.yr:last.yr)
+      # uncertainty on the wt-relationship
+      covars.wt.uncertainty = prep_Growth.Uncertainty.by.age_covars(wt.noise.per.stk[wt.noise.per.stk$iter == iter.x,],
+                                                                    first.yr = first.yr,
+                                                                    last.yr = last.yr)
+      
+      # join covars
+      covars.x = c(covars.GrowthEnv,covars.wt.uncertainty,covars_catchability)
+      
+      # ---------------------------------------------- #
+      # update wgts with resampled recruitment weights
+      # ---------------------------------------------- #
+      for(rr in names(stks_recWgts_sample)){
+        biols.x[[rr]]@wt[1,] <- stks_recWgts_sample[[rr]][rownames(stks_recWgts_sample[[rr]]) %in% ac(first.yr:last.yr),iter.x]
+      }
+    } else{
+      covars.x = covars
+      fleets.ctrl.x$fl1$effort.model = "SMFB"
+      biols.ctrl.x = lapply(biols.ctrl.x,function(x){
+        x$growth.model = "ASPG"
+        return(x)})
+    }
+    
+    
+    # ---------- #
+    # ---------- #
+    # run FLBEIA
+    # ---------- #
+    # ---------- #
+      res <- FLBEIA(
+        biols = biols.x, # updated 
+        SRs = SRs.x, # updated 
+        BDs = BDs, 
+        fleets = fleets.x, # updated 
+        covars = covars.x, # updated 
+        indices = indices, 
+        advice = advice,
+        main.ctrl = main.ctrl.x, # updated
+        biols.ctrl = biols.ctrl.x, # updated
+        fleets.ctrl = fleets.ctrl.x, # updated
+        covars.ctrl = covars.ctrl, 
+        obs.ctrl = obs.ctrl, 
+        assess.ctrl = assess.ctrl, 
+        advice.ctrl = advice.ctrl.x # updated
+      )
+      
+      
+    # return stock objects
+    stk.x <- biolfleets2flstock(biol = res$biols[[1]], fleets = res$fleets)
+    stk.x <- window(stk.x, end = last.yr)
+    
+    # make summary objects
+    BRPs.x <- BRPs[stk_name, ]
+    BRPs.x$stock <- "stk"
+    BRPs.x$Ftarget <- BRPs.x$Fmsy
+    BRPs.x$Btarget <- NA
+    BRPs.x$iter <- 1
+    BRPs.x <- BRPs.x[,c("stock", "iter", "Bpa", "Blim", "Btarget", "Fpa", "Flim", "Ftarget")]
+    bioSum.x <- bioSum(res, scenario = scen$name[x], years = an(c(hist.yrs, proj.yrs)), brp = BRPs.x)
+    # bioSum.x$Ftarget <- advice.ctrl.x$stk$ref.pts["Fmsy",]
+    bioSum.x$iter <- iter.x
+    
+    # return result
+    gc()
+    return(list(raw.x = res, stk.x = stk.x, bioSum.x = bioSum.x))
+  }
+```
+
+### 4.4 Run simulation
+
+Setup the simulation for parallelisation and run it.
+
+```{r parallel setup,cache=T}
+  clusterType <- ifelse(Sys.info()["sysname"] == "Windows", "PSOCK", "FORK")
+ 
+  # define exactly what to export to each worker and what not:
+  # (to avoid RAM filling up too quickly...)
+  if(length(stk_long) != 0){
+    obj_exclude = grep(paste(sub(stk_long,"",grep(stk_long,ls(),value= T)),collapse = "|"),ls(),value = T)
+    obj_exclude = obj_exclude[!grepl(stk_long,obj_exclude)]
+    obj_exclude = c(obj_exclude,"EMSRRs_boot")
+  } else {
+    obj_exclude = "EMSRRs_boot"
+  }
+  ARGS <- ls()[!(ls() %in% obj_exclude)]
+  
+  # run in parallel for faster execution
+  n.cores = 3
+  cl <- parallel::makeCluster(n.cores, type=clusterType)
+  nn <- split(seq(niter), seq(niter))
+  parallel::clusterExport(cl, varlist = ARGS, envir=environment())
+  start.time = Sys.time()
+  RES <- parLapply(cl, nn, parFun)
+  stopCluster(cl)
+  end.time = Sys.time()
+  time.taken = end.time - start.time
+  print(time.taken)
+  # takes around 40 seconds for 1 iteration & 7mins for 10 iterations on my machine
+```
+
+## 5. Output
+
+Summarize & plot the output:
+
+```{r Collate output}
+  # make multi-iter stock object for rcp4.5, rcp8.5 and noCC
+  stks = list()
+  climScen = unique(scen$clim.scen)
+  for(cl in climScen){
+    indx.cl = which(scen$clim.scen == cl)
+    tmp.res = RES[indx.cl]
+    # create stock-obj
+    stk <- tmp.res[[1]]$stk.x
+    stk <- propagate(stk, length(tmp.res))
+    for(i in seq(tmp.res)){
+      iter(stk, i) <- tmp.res[[i]]$stk.x
+    }
+    stks[[stk_name]][[cl]] <- stk
+    rm(stk)
+  }
+  # # rename for plotting
+   stks$`COD-NS`$noCC@name <- "noCC"
+   stks$`COD-NS`$rcp45@name <- "RCP4.5"
+   stks$`COD-NS`$rcp85@name <- "RCP8.5"
+  
+   # define new colour-bar
+   col.bar3 = c("aquamarine4","orange","darkred")
+   
+   # compare noCC with rcp4.5 and rcp8.5 with ggplotFL
+  plot(FLStocks(stks$`COD-NS`$noCC,
+                stks$`COD-NS`$rcp45,
+                stks$`COD-NS`$rcp85)) + 
+    scale_colour_manual(values = col.bar3) + 
+    scale_fill_manual(values = col.bar3) +
+    facet_wrap(~qname,scales = "free_y") + 
+    theme(legend.position="bottom") + 
+    ggtitle("Cod-NS eco-MSE")
+```
+
+## 6. Software Versions
+
+`r version$version.string`
+
+**basetheme:** `r packageVersion('basetheme')`
+
+**cobs:** `r packageVersion('cobs')`
+
+**earth:** `r packageVersion('earth')`
+
+**FLash:** `r packageVersion('FLash')`
+
+**FLAssess:** `r packageVersion('FLAssess')`
+
+**FLBEIA:** `r packageVersion('FLBEIA')`
+
+**FLCore:** `r packageVersion('FLCore')`
+
+**FLFleet:** `r packageVersion('FLFleet')`
+
+**ggplotFL:** `r packageVersion('ggplotFL')`
+
+**glmmTMB:** `r packageVersion('glmmTMB')`
+
+Compiled: `r format(Sys.Date(), '%Y-%b-%d')`
