@@ -29,6 +29,11 @@ run.sms.MSE <- function(df.tmb,
     seeds <-  round(runif(nruns, min = 1, max = 1e6))
   }
 
+  if(length(seeds) == 1 & nruns > 1){
+    set.seed(seeds)
+    seeds <- round(runif(nruns, min = 1, max = 1e6),digits = 0)
+  }
+
   # Survey catchability
   Q <- getCatchability(df.tmb, sas)
   Q <- array(Q$Q, dim = c(df.tmb$nage, df.tmb$nsurvey), )
@@ -221,6 +226,11 @@ run.sms.MSE <- function(df.tmb,
         mps <- getMPS(df.assess, parms.mse )
         env_new <- apply(df.assess$env_matrix,MAR = 1,FUN = sample, size = 1)
 
+        env[,nyear-1] <- env_new
+        env <- cbind(env, rep(1, length(env_new)))
+
+        df.assess$env.new <- env_new
+
         if(df.assess$recmodel == 3){
         Rnew <- estimateRecruitment(df.mse, as.numeric(tmp$SSB[nyear]), method = 'BH_env', env_new = env_new)
         }
@@ -241,13 +251,13 @@ run.sms.MSE <- function(df.tmb,
         if(HCR == 'Fmsy'){
 
           if(is.null(Fmsy)){
-            stop('Provide Fmsy for this option')
+            stop('Currently not working')
           }
 
 
           fcast <- getTAC(df.assess,
                           assess,
-                          recruitment = 'mean',
+                          recruitment = recruitment,
                           avg_R = 5,
                           HCR = 'Fmsy')
           Fsel <- fcast$Fnext
@@ -258,7 +268,7 @@ run.sms.MSE <- function(df.tmb,
         if(HCR == 'Fmean'){
           fcast <- getTAC(df.assess,
                           assess,
-                          recruitment = 'mean',
+                          recruitment = recruitment,
                           avg_R = 5,
                           HCR = 'Fmean')
 
@@ -272,7 +282,7 @@ run.sms.MSE <- function(df.tmb,
           if(yr == 1){
             fcast <- getTAC(df.assess,
                             assess,
-                            recruitment = 'mean',
+                            recruitment = recruitment,
                             avg_R = 5,
                             HCR = 'Fmean')
 
@@ -288,7 +298,7 @@ run.sms.MSE <- function(df.tmb,
 
             fcast <- getTAC(df.assess,
                             assess,
-                            recruitment = 'mean',
+                            recruitment = recruitment,
                             avg_R = 5,
                             HCR = 'Fmean')
 
@@ -301,8 +311,7 @@ run.sms.MSE <- function(df.tmb,
 
         Fnew <- abind::abind(Fnew, Fsel, along = 2)
         # Run the rest of the year in the OM
-        env[,nyear-1] <- env_new
-        env <- cbind(env, rep(1, length(env_new)))
+
 
         df.mse <-  list(
           years = years.new,
