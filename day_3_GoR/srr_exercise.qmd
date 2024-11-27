@@ -1,0 +1,371 @@
+---
+title: "smsR environmental data exercise"
+author: "Nis Sand Jacobsen"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+## Exercise on environmental input for Gulf of Riga herring
+
+The Gulf of Riga herring was chosen as a case study, as it was known to have recruitment interactions with environmental data. The dataset we have available is measured data points, so we do not have a model forecast. We will do a simple analysis here and sample some upper or lower quartiles of the data for the MSE.
+
+```{r}
+#| echo: true 
+#| eval: true 
+#| message: false
+#| warning: false
+
+# Redownload smsR. Change dependencies to TRUE if it's the first time you download. 
+# remotes::install_github("https://github.com/nissandjac/smsR", 
+#                         dependencies = FALSE) # Change this link to the development version
+
+
+# First we load smsR
+library(smsR)
+library(tidyverse)
+
+# We can source some local files to read the GoR 
+
+# Insert your working folder here 
+wd <- "~/Github/SEAwise_ecoMSE/day_3_GoR"
+
+
+# Three cusom files need
+source(file.path(wd,'R/run_sms_MSE.R'))
+source(file.path(wd, 'R/mse_tools.R'))
+
+```
+
+We can then proceed to load the data using some standardized functions from $smsR$, and assign some useful quantities, such as the ages and years modeled.
+
+```{r}
+#| echo: true 
+#| eval: true 
+
+maxage <- 8 # Max age used in the assessment 
+years <- 1977:2023 # Year span we are simulating 
+
+# This function is a standardized function to read input from the SAM assessment model 
+dat <- read.sam.data(file.path(wd, 'data/'))
+
+# Some basic info to run the model
+ages <- 0:maxage
+# 
+# dimnames(dat$Surveyobs) <- list(ages, years, 'acoustic')
+
+```
+
+Here $dat$ produces a list that contains regular stock assessment input. First the two main data sources used to fit the data:
+
+1)  Catch per age
+2)  Survey per age
+
+and second a list `dat$mtrx` which contains
+
+1)  weca (weight at age in catch)
+2)  west (weight at age in survey/stock)
+3)  mat (maturity at age)
+4)  M (natural mortality per age)
+5)  propF (proportion of F occurring before spawning)
+6)  propM (proportion of M occurring before spawning)
+
+If you do not have propF or propM available for a given stock, then the model will automatically set it to 0. We can then use the data to prepare $smsR$ to run a full stock assessment. First we prepare the model configuration with the `get_TMB_parameters()` call. This function contains many options to change settings in the stock assessment, or have alternative formulations.
+
+```{r}
+#| echo: true 
+#| eval: true 
+#| warning: false
+
+
+df.tmb <- get_TMB_parameters(
+  mtrx = dat$mtrx, # List that contains M, mat, west, weca
+  Surveyobs = dat$Surveyobs, # Survey observations (dimensions age, year, quarter, number of surveys)
+  Catchobs = dat$Catchobs, # Catch observations  (dimensions age, year, quarter)
+  propM = dat$mtrx$propM,
+  propF = dat$mtrx$propF,
+  years = years, # Years to run
+  nseason = 1, # Number of seasons
+  ages = ages, # Ages of the species
+  Fbarage = c(3,7), # Ages to calculate average fishing mortality (used for Fmsy calc)
+  Fminage = 1, # First age 
+  Fmaxage = 5, # Fully selected fishing mortality age
+  Qminage = c(1), # minimum age in surveys,
+  Qlastage = c(4), # Last age for asymptotic fishing mortality in survey
+  Qmaxage = c(8), # Last age in survey 
+  surveyStart = c(.625 ), # Fraction of the season where the survey starts
+  surveyEnd =  c(.7 ), # Fraction of the season where the survey end
+  surveyCV =  list(c(1,2,7)),
+  catchCV = list(c(0,1)),
+  randomF = 1,
+  randomR = 1,
+  recmodel = 3, # Chose recruitment model 
+  beta = 60000, # Hockey stick plateau
+  nllfactor = c(1,1,1) # Factor for relative strength of log-likelihood
+
+)
+
+```
+
+This new list contains all the information the model needs to run a stock assessment (if the data has sufficient quality). If for instance the matrix dimensions of survey or catch have wrong dimensions the function will send an error message.
+
+## Running the stock assessment model
+
+We can now run the stock assessment by first preparing the parameters, and then running the assessment.
+
+```{r}
+#| echo: true 
+#| eval: true
+#| warn: false
+#| message: true 
+
+parms <- getParms(df.tmb)
+# And run the assessment 
+sas <- runAssessment(df.tmb, parms)
+
+```
+
+Our model converged. We can also look at the AIC `AIC(sas)`. Lets inspect the fit by looking at standard output, which is easily done with the standard plotting code.
+
+```{r}
+
+plot(sas)
+
+```
+
+Since the survey starts detecting 1 year olds, the model has a hard time estimating recruitment in the final year (no data to support it). In general, the stock is doing well being above Blim, and only having a moderate fishing mortality.
+
+We can also see get some model diagnostics. For instance do 5 mohns rho peels.
+
+```{r}
+#| message: false
+#| warning: false
+
+# This function has a range of diagnostic plots. 
+mr <- mohns_rho(df.tmb, parms, peels = 5, plotfigure = FALSE)
+
+print(mr$p1())
+```
+
+## Loading and using environmental data
+
+Now lets try to redo the stock assessment, but fit some environmental parameters. They are included in the csv files produced here.
+
+```{r}
+env <- read.csv(file.path(wd,'data/herring_data_env.csv'), sep = ';')
+
+# See head(env) for other available covariates 
+ 
+# Remove some of the irrelevant parameters from the csv 
+env_in <- as.matrix(env %>% select(c('winter_s','e_may_E2','summer_temp')))
+env_in[,1] <- env_in[,1] * -1 # Make sure the scale is is low to high 
+# The observational data is only until 2020. We add the mean for the last couple of years 
+env_in <- abind::abind(env_in, matrix(colMeans(env_in), nrow = 3, ncol = ncol(env_in), byrow = TRUE), along = 1)
+ 
+
+
+# Normalize the matrix to have mean 0 and SD 1 
+env_in <- scale(env_in)
+
+```
+
+winter_s (strength of winter severity), e_may_E2 (abundance of copepods in may) and summer_temp (summer temperatures) are three variables that I have tested to have an effect on recruitment, and they all make sense from a physiological perspective. Unfortunately, we only have until 2020 data available, so we have to assume the mean for the last couple of years.
+
+We can now run the assessment again with the new temperature input. The base input changes the recruitment to a random effect and we use a stock-recruitment model so that we can use it in MSE.
+
+```{r}
+#| echo: true 
+#| eval: true
+#| warning: false
+#| message: true 
+
+df.env <- get_TMB_parameters(
+  mtrx = dat$mtrx, # List that contains M, mat, west, weca
+  Surveyobs = dat$Surveyobs, # Survey observations (dimensions age, year, quarter, number of surveys)
+  Catchobs = dat$Catchobs, # Catch observations  (dimensions age, year, quarter)
+  propM = dat$mtrx$propM,
+  propF = dat$mtrx$propF,
+  years = years, # Years to run
+  nseason = 1, # Number of seasons
+  ages = ages, # Ages of the species
+  Fbarage = c(3,7), # Ages to calculate average fishing mortality (used for Fmsy calc)
+  Fminage = 1, # First age 
+  Fmaxage = 5, # Fully selected fishing mortality age
+  Qminage = c(1), # minimum age in surveys,
+  Qlastage = c(4), # Last age for asymptotic fishing mortality in survey
+  Qmaxage = c(8), # Last age in survey 
+  surveyStart = c(.625 ), # Fraction of the season where the survey starts
+  surveyEnd =  c(.7 ), # Fraction of the season where the survey end
+  surveyCV =  list(c(1,2,7)),
+  catchCV = list(c(0,1)),
+  randomR = 1, 
+  randomF = 1,
+  recmodel = 3, # Option 3 is Beverton holt with environemntal input 
+  beta = 60000, # Hockey stick plateau
+  nllfactor = c(1,1,1) # Factor for relative strength of log-likelihood
+
+)
+
+```
+
+And we can add the environmental data to the input data
+
+```{r}
+# These names have to be exact for the assessment model
+df.env$env_matrix <- t(env_in)
+# An internal loop needs to see how many covariates are being used
+df.env$nenv <- nrow(df.env$env_matrix)
+
+```
+
+Finally, we can prepare the model by finding the parameters we need to estimate, and running the assessment. As there are random effects in this model it takes longer to converge.
+
+```{r}
+
+parms.env <- getParms(df.env) # Standard smsR call to get the estimated parameters
+#mps <- getMPS(df.env, parms.env)
+sas.env <- runAssessment(df.env, parms.env)
+
+```
+
+We can then plot the model and see that the prediction is actually similar.
+
+```{r}
+plot(sas.env)
+
+```
+
+We can now get the estimated parameters and plot them with their uncertainty. For visual purposes here I am plotting them as distributions, however they are not really MCMC sampled.
+
+```{r}
+# Get the estimated parameters 
+parms.est <- getEstimatedParms(sas.env) %>% filter(parameter == 'env')
+parms.est$parameter <- colnames(env_in)
+
+env.plt.stat <-as.data.frame(Map(function(x, y) rnorm(10000, mean = x, sd = y), 
+                                 parms.est$value, parms.est$se), col.names = parms.est$parameter) %>% 
+  pivot_longer(1:3)
+
+ggplot(as.data.frame(env.plt.stat), aes(x=value))+#geom_point()+#geom_errorbar(aes(ymin = low, ymax = high))+
+  theme_classic()+ geom_vline(aes(xintercept = 0), linetype = 2)+scale_y_continuous('')+
+  scale_x_continuous(expression(beta))+
+  geom_density(aes(fill = name), alpha = 0.2)+
+  facet_wrap(~factor(name), ncol = 1, strip.position = 'top', scales = 'free_y', dir = 'v')+
+  theme(legend.position = 'none', axis.text.y = element_blank())
+
+```
+
+We can see here that the winter severity has a negative impact on recruitment, and e_may_E2 and summer temperature has a positive impact, with the zooplankton abundance having the highest impact.
+
+Let's also do some diagnostics on this model
+
+```{r}
+#| warning: false
+#| message: true 
+
+mr.env <- mohns_rho(df.env, parms.env, peels = 5, plotfigure = FALSE)
+print(mr.env$p1())
+
+```
+
+## Running the MSE
+
+Finally, let's run an MSE with and without this setup to see how large of a difference it makes to have the environmental parameters added. First we run an MSE without the operating model having environmental covariates. The function below takes the assessment model and turns it into an operating model working the same way as the assessment model and fits to itself. This means uncertainty on surveys and recruitment into the future.
+
+```{r}
+#| warning: false
+
+# Need some libraries for parallelizing 
+
+#library(parallel)
+library(foreach)
+
+
+mse_years <- 10 # Number of years to run 
+nruns <- 2 # Number of different simulations
+HCR <- 'Fmsy_ext' # Determine the Harvest control rule in the MSE. This is Fmsy from external sources
+recruitment <- 'mean' # recruitment in the forecast 
+
+# Assign Fmsy 
+df.tmb$Fmsy <- 0.3
+
+# Run MSE for the standard model without environmental input
+
+
+mse <- run.sms.MSE(df.tmb, # parameters for assesment model
+                   sas,  # Fitted smsR assessment model
+                   mse_years = mse_years, # Years to simulate into the future
+                   HCR = HCR, # Harvest control rule
+                   recruitment = recruitment, # Recruitment function for the forecast 
+                   n.cores = 4, # Number of cores for multithread processing
+                   nruns = nruns, # Number of simulated runs (should be at least 100 for a final model)
+                   wd = wd, 
+                   seeds = 1234) # Working directory to source functions (each parallel process runs a unique application of R)
+
+# Just an easy function to make everything into data frame 
+mse <- unlist_MSE(mse,nruns = nruns)
+
+# mse[[1]] contains SSB, R, F from OM and EM
+# mse[[3]] contains the estimated parameters in the last year of the simulation
+ 
+```
+
+As you can see this operation takes some time. It has to estimate 1 assessment every year in each of the number of simulations we have run. Lets plot the estimated vs the true SSB.
+
+```{r}
+
+
+ggplot(mse[[1]], aes(x = years, y = SSB, color = model))+geom_line()+
+  facet_wrap(~year_assess)+theme_classic()+geom_vline(aes(xintercept = 2023), linetype = 2)
+
+```
+
+As we can see the last year is often hard to estimate the final year. Let's do the same exercise with the environmental model.
+
+```{r}
+df.env$Fmsy <- 0.3
+
+mse.env <- run.sms.MSE(df.env, # parameters for assesment model
+                   sas.env,  # Fitted smsR assessment model
+                   mse_years = mse_years, # Years to simulate into the future
+                   HCR = HCR, # Harvest control rule
+                   recruitment = 'BH_env', # Recruitment in forecast uses the environmental data
+                   n.cores = 4, # Number of cores for multithread processing
+                   nruns = nruns, # Number of simulated runs (should be at least 100 for a final model)
+                   wd = wd, # wd to source files 
+                   seeds = 1234) # 
+
+mse.env <- unlist_MSE(mse.env,nruns = nruns)
+
+
+```
+
+```{r}
+ggplot(mse.env[[1]], aes(x = years, y = SSB, color = model))+geom_line()+
+  facet_wrap(~year_assess)+theme_classic()+geom_vline(aes(xintercept = 2023), linetype = 2)
+
+
+```
+
+## Compare the two models
+
+The two models were run with the same seed, but produce two different results. Think about the results and what you could do with them.
+
+Here are four points to consider
+
+-   How would you chose between the environmental SSR model and the base model?
+
+-   What are some relevant MSEs to run
+
+-   Does the model fit differently to the two time series? 
+
+-   How do the two models differ in their fit to data?
+
+-   How would you simulate to operating model into the future given the available observed dataset on e.g., temperature and zooplankton abundance?
+
+## Contact and issues.
+
+The software is under development. To use it for your own stock contact me at $nsja@aqua.dtu.dk$ or through the Github issues page.
+
+This document was run with the latest version of smsR 26/11/2024.

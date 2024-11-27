@@ -54,31 +54,32 @@ library(tidyr)
 
 # Introduction
 
-The following examples focus on some strategies for selecting statistical models for use in management strategy evaluation.
+The following examples focus on some strategies for selecting statistical models for use in management strategy evaluation (MSE).
 
-Some general criteria:
+Some general criteria for model selection:
 
-- **We want a model that makes biological sense**
-    - Includes plausible covariates, even if the precise mechanism is not known
-- **We want a model that fits the observed data well**
-    - But, careful not to overfit data
-- **We want a model that can make good predictions**
-    - Can the model also predict well into the future?
-    - Is it better than a simpler (naive) assumption of future values
-
+-   **We want a model that makes biological sense**
+    -   Includes plausible covariates, even if the precise mechanism is not known
+-   **We want a model that fits the observed data well**
+    -   But, careful not to overfit data
+-   **We want a model that can make good predictions**
+    -   Can the model also predict well into the future?
+    -   Is it better than a simpler (naive) assumption of future values
 
 # Synthetic data creation
 
-We will generate the data used in the example for simplicity and to gain insight into the model selection process, as we will know the "true" underlying relationship. 
+We will generate synthetic data for the following examples, both for simplicity and to gain insight into the model selection process, as we will know the "true" underlying relationship.
 
-The example shown here will be an environmentally-mediated stock-recruitment relationship (EMSRR), using a modified Ricker [e.g. "controlling"-type as described by @levi_embedding_2003]
+The example will be to fit an environmentally-mediated stock-recruitment relationship (EMSRR), using a modified Ricker [e.g. "controlling"-type as described by @levi_embedding_2003; @iles_stock_1998]:
+
+-   *Ricker*: $R = \alpha SSBe^{−\beta SSB}$ ; $log(R) = log(\alpha) + log(SSB) – \beta SSB$
+-   *Ricker wih env.* : $R = \alpha SSBe^{−\beta SSB} e^{cE}$ ; $log(R) = log(\alpha) + log(SSB) – \beta SSB + cE$
 
 ## Environmental covariates
 
-First, we define some environmental covariates using an autoregressive integrated moving average (ARIMA) model. Here we will model only AR1 processes, which is defined by the degree of correlation for subsequent values based on prior ones.
+First, we define some environmental covariates using an autoregressive integrated moving average (ARIMA) model. Only AR1 processes are included, which define the the correlation between prior and subsequent values.
 
-In a real modelling exploration, these covariates should be chosen with some plausible connection to the biological process at hand; for example, a temperature signal corresponding to the main spawning period.
-
+In a real modelling exploration, these covariates should be chosen with some plausible connection to the biological process at hand; for example, a temperature signal corresponding to the main spawning period. However, there may be many potential environmental drivers.
 
 ```{r genCovs, fig.height = 6}
 set.seed(1235)
@@ -117,7 +118,9 @@ ggplot(df) + aes(x = t, y = value, fill = name, color = name) +
 
 ## Biological covariates and response
 
-Spawning stock biomass (SSB) is generated here as a random walk, and recruitment is predicted using SSB and the mediation of two of the above environmental covariates ("x01" and "x03").
+Spawning stock biomass (SSB) is generated here as a random walk process, and recruitment is predicted using SSB and the mediation of two of the above environmental covariates ("x01" and "x03"). Additional noise is also added (random log-normal with a coefficient of variation of 20%).
+
+Note that in reality, recruitment is often lagged behind SSB and depends on the minimum age included in the assessment. In this data set, let's assume that `t` refers to the time when spawning biomass was assessed.
 
 ```{r genBioVars, fig.height=3}
 # generate ssb (random walk)
@@ -155,13 +158,13 @@ corrplot.mixed(cor(dat[,-1]))
 
 ## Full model definition
 
-We will start with a full model that includes all environmental covariates (`fit0`). This is clearly more complicated than our true relationship, and the task below will be to try and eliminate the insignificant ones that just add noise to the prediction.
+We will start with a full model that includes all environmental covariates (`fit0`). This is clearly more complicated than our true relationship, and the task below will be to try and eliminate insignificant covariates that just add noise to the prediction.
 
-We will be fitting a Generalized Linear Model (GLM) (`glm()`), where we can also define a specific error distribution and link function to be used in the model. A log-link is sensible given the error structure and the fact that our response variable (recruitment) can only be positive.
+We will be fitting a Generalized Linear Model (GLM) (`glm()`), where we define a specific error distribution and link function to be used in the model. A log-link is sensible given that we are using the log-transformed version of the Ricker, and the fact that our response variable (recruitment) can only be positive.
 
-Returning a `summary` of the model already provides us with information about the potential significance of each term.
+A `summary` of the model already provides us with information about the potential significance of each term.
 
-Based on these p-values, one could start removing those terms that have lowest significance and try to arrive to a simpler model, but, with so many covariates, this could be a time-consuming endeavor. 
+Based on these p-values, one could start removing terms that have lowest significance, and try to arrive to a simpler model; but, with so many covariates, this could be a time-consuming endeavor when done manually.
 
 ```{r fullModel}
 fmla <- formula(paste(c("rec ~ offset(log(ssb)) + ssb", envvars), collapse = " + "))
@@ -169,25 +172,30 @@ fmla
 fit0 <- glm(fmla, data = dat, family = gaussian(link = "log"))
 summary(fit0)
 ```
+
 # Model selection with Akaike information criterion
 
-A large part of model building is selecting the best model to describe the response variable. An important concept to remember when looking for the "best" model is whether the addition of terms improves the predictive power of the model. Generally, the more explanatory variables that one has, the more variation will be explained in the response variable, but one has to be careful not to include variables that do not explain a *significant* portion of the variation. The inclusion of these terms might help you achieve a higher $R^2$ value for your specific data set, but are likely to be a poor predictor of new data that was not seen during the fitting. This problem is referred to as "*overfitting*".
+A large part of model building is selecting the best model to describe the response variable. An important concept to remember when looking for the "best" model is whether the addition of terms improves the predictive power of the model.
 
-The strategy presented here relies on the comparison of "*nested models*" in determining whether a term should be kept or not. Nested models differ by a single term, whereby the larger model contains all of the terms of the smaller model, plus an additional one. One commonly used strategy, is to start with your most complex model and work backwards, sequentially removing variables that are not significant. 
+Generally, the more explanatory variables that one has, the more variation will be explained in the response variable, but one has to be careful not to include variables that do not explain a *significant* portion of the variation. The inclusion of these terms might help you achieve a higher $R^2$ value for your specific data set, but are likely to be a poor predictor of new data that was not seen during the fitting. This problem is referred to as "*overfitting*".
+
+The Akaike information criterion (AIC) is an estimator of prediction error and thereby relative quality of statistical models for a given set of data: $AIC = 2k-ln(\hat{L})$, where $k$ is the number of estimated parameters and $\hat{L}$ is the maximized value of the likelihood function for the model. By considering the model complexity with $k$, AIC penalizes more complex models. Using this criteria, we would select a model based on the lowest AIC.
+
+The strategy presented here relies on the comparison of "*nested models*" in determining whether a term should be kept or not. Nested models differ by a single term, whereby the larger model contains all of the terms of the smaller model, plus an additional one. One commonly used strategy, is to start with your most complex model and work backwards, sequentially removing variables that are not significant.
 
 As a general rule, one should start by removing higher-order terms first (e.g. interaction terms) before moving on main terms or lower-level nested terms. Furthermore, some believe that there is a general rule stating that the main term should always be included if the term is also used in an interaction (see discussion [here](http://stats.stackexchange.com/q/11009/10675)).
 
-This logic is used within the automated stepwise search routine found in the function `step()` (introduced below). 
+This logic is used within the automated stepwise search routine found in the function `step()` (introduced below).
 
 ## Stepwise search
 
-By default the `step` function uses a `direction = "backward"` search, which starts with the largest model and removes terms gradually according to the largest improvements (reductions) to the Akaike information criteria (AIC). When `direction = "both"`, terms may come back into the model at later steps. 
+By default the `step` function uses a `direction = "backward"` search, which starts with the largest model and removes terms gradually according to the largest improvements (reductions) to the Akaike information criteria (AIC). When `direction = "both"`, terms may come back into the model at later steps.
 
-The following example also specifies the simplest allowed model with the `lower` argument, which is defined here as the standard Ricker stock-recruitment relationship; e.g. we assume that a minimal mechanistically-based model exists where SSB is required to produce eggs and, thus, recruits. 
+The following example also specifies the simplest allowed model with the `lower` argument, which is defined here as the standard Ricker stock-recruitment relationship; e.g. we assume that a minimal mechanistically-based model exists where SSB is required to produce eggs and, thus, recruits.
 
-Note that a general rule-of-thumb for significant improvements (e.g. p < 0.05) is that the change in AIC should be at least two units ($\delta AIC \geq 2$). The `step` function does not use this criteria, and any reduction in AIC is considered as an improvement.
+Note that a general rule-of-thumb for significant improvements (e.g. p \< 0.05) is that the change in AIC should be at least two units ($\delta AIC \geq 2$); otherwise, take the simpler of the two models. The `step` function does not use this criteria, and any reduction in AIC is considered as an improvement.
 
-A comparison of AIC between the resulting model (`fit`) to the full one (`fit0`) shows the degree of improvement. The model was reduced to 5 environmental covariates before the search stopped (and some of these look to be less significant). 
+A comparison of AIC between the resulting model (`fit`) to the full one (`fit0`) shows the degree of improvement. The model was reduced to 5 environmental covariates before the search stopped (and some of these look to be less significant).
 
 ```{r stepwiseRemoval}
 # model with all original variables in fit0
@@ -205,13 +213,19 @@ fit <- step(fit0,
 )
 
 summary(fit)
-c(fit0=AIC(fit0), fit=AIC(fit)) # comparison of AIC
+
+# comparison of AIC & R2
+df <- data.frame(AIC=c(AIC(fit0), AIC(fit)),
+  R2 = c(1 - fit0$deviance/fit0$null.deviance, 
+    1 - fit$deviance/fit$null.deviance), 
+  row.names = c("fit0", "fit"))
+print(df)
 ```
 
 
 ## Dredging
 
-If your model fitting is fast, and there are not too many possible combinations ($combinations = 2^n-1$, where n is the number of possible covariates), then one could try all possible models with the `dredge` function (package `MuMIn` -- *Multi-Model Inference*), which can handle many model types. In our example, it's relatively quick to run through all possible models (n = `r 2^length(envvars)-1`). The function `pdredge` can also parallelize the process. 
+If your model fitting is fast, and there are not too many possible combinations ($combinations = 2^n-1$, where n is the number of possible covariates), then one could try all possible models with the `dredge` function (package `MuMIn` -- *Multi-Model Inference*), which can handle many model types. In our example, it's relatively quick to run through all possible models (n = `r 2^length(envvars)-1`). The function `pdredge` can also run the process using parallel computing.
 
 Again, we can define by the minimal model using the `fixed` argument.
 
@@ -229,14 +243,11 @@ t2 <- Sys.time()
 plot(dd[1:100,], labAsExpr = TRUE)
 ```
 
-
-
-
 # Visualizing marginal effects
 
 Given the complex relationships that may result in models with many terms (and potential interactions), it may be helpful to visualize marginal effects of environmental covariates one at a time, holding others constant.
 
-In the following example, we plot the predictions of the model, holding all but one of the environmental covariates to their long-term median values (i.e. constant). Several levels of the focus environmental covariate are used (e.g. quantiles from the historical time series) to show how the stock-recruitment relationship is influenced. 
+In the following example, we plot the predictions of the model, holding all but one of the environmental covariates to their long-term median values (i.e. constant). Several levels of the focus environmental covariate are used (e.g. quantiles from the historical time series) to show how the stock-recruitment relationship is influenced.
 
 ```{r plotRicker}
 envvarsKeep <- intersect(names(coef(fit)), envvars) # maintained env. covariates
@@ -263,23 +274,26 @@ ggplot(dat) + aes(x = ssb, y = rec, col = get(focusVar)) +
 
 # Model selection via cross validation
 
-- Cross validation is a flexible framework that tests how well a model can predict independent (unseen) data.
-- Data is typically split into two set; one for model fitting (*training data*) and one for prediction (*validation data*).
-- Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure). Under careful design, cross validation can identify models that suffer from overfitting through decreased prediction performance.
-- Performance can be evaluated based on a desired metric. 
+-   Cross validation is a flexible framework that tests how well a model can predict independent (unseen) data.
+-   Data is typically split into two sets; one for model fitting (*training data*) and one for prediction (*validation data*).
+-   Can be used as a basis for selecting best performing model (e.g. inclusion of terms, model structure). Under careful design, cross validation can identify models that suffer from overfitting through decreased prediction performance.
+-   Performance is evaluated based on a desired metric (see below).
 
-Cross validation differs from AIC in that it is a more general, data-driven approach that directly estimates predictive performance on new data, applicable to both parametric and non-parametric models. 
+Cross validation differs from AIC in that it is a more general, data-driven approach that directly estimates predictive performance on new data, applicable to both parametric and non-parametric models.
 
 AIC is a faster, theory-driven method that penalizes complexity based on the number of parameters, making it suitable for comparing parametric models.
 
-
 ## Common metrics
 
-Below are some common metrics that could be used for model selection. The choice of metric will depend on the goal of the model prediction. For example,
+Below are some common metrics that could be used for model selection. The choice of metric will depend on the goal of the model prediction.
 
 Note that these metrics may differ from those by the model's fitting criteria to the training data set. Consistency between the two may be desirable, although one might want to emphasize other aspects of the prediction (validation) data set.
 
-For example, squared error metrics, like Mean Squared Error ($MSE$) and Root Mean Squared Error ($RMSE$), will more heavily penalize outliers and large errors. Mean Absolute Error $MAE$ an intuitive metric that gives average error in the same units as the data. Mean Absolute Percentage Error ($MAPE$) and Mean Absolute Scaled Error ($MASE$) provide a scale-independent metric, useful when data varies significantly in magnitude. One may further decide whether data should be transformed (e.g. log-transformation) before evaluation by a metric.
+-   Squared error metrics, like Mean Squared Error ($MSE$) and Root Mean Squared Error ($RMSE$), will more heavily penalize outliers and large errors.
+
+-   Mean Absolute Error $MAE$ an intuitive metric that gives average error in the same units as the data.
+
+-   Mean Absolute Percentage Error ($MAPE$) and Mean Absolute Scaled Error ($MASE$) provide a scale-independent metric, useful when data varies significantly in magnitude. One may further decide whether data should be transformed (e.g. log-transformation) before evaluation by a metric.
 
 Below are some R functions that can return these metrics, with arguments `y` and `yhat` providing the observed and predicted response values, respectively, of the validation data.
 
@@ -293,7 +307,7 @@ rmse <- function(y, yhat){sqrt(mean((y - yhat)^2, na.rm = TRUE))}
 # Mean Absolute Percentage Error (MAPE)
 mape <- function(y, yhat){mean(abs(y - yhat) / y, na.rm = TRUE)}
 
-# Median Absolute Percentage Error (MAPE)
+# Median Absolute Percentage Error (MdAPE)
 mdape <- function(y, yhat){median(abs(y - yhat) / y, na.rm = TRUE)}
 
 # Mean Absolute Error (MAE)
@@ -310,7 +324,7 @@ Many flavors of cross validation exist, but we will focus on one of the most com
 
 In this approach, *k* signifies the number of random groupings (i.e. *folds*) to use for the training and validation data. The groups are balanced, such that each data sample will be used once for validation.
 
-For example, the commonly used 5-fold cross validation divides the data into 5 groups, with each fold using 4 out of 5 of the groups for training (\~80% of data) and the remaining group for validation (\~20% of data). 
+For example, the commonly used 5-fold cross validation divides the data into 5 groups, with each fold using 4 out of 5 of the groups for training (\~80% of data) and the remaining group for validation (\~20% of data).
 
 To increase the robustness of the prediction error estimates, the procedure can be repeated a number of times, with fold assignment changing randomly for each permutation.
 
@@ -318,8 +332,8 @@ To increase the robustness of the prediction error estimates, the procedure can 
 
 The following functions will be used in the examples:
 
-- `kfold()` - Randomly partitions the data into the prescribed number of folds (`k`)
-- `cvFun()` - Re-fits a defined model to each of the folds defined by `kfold` and records the observed and predicted response values (inner loop), which can be repeated for a defined number of permutations,`nperm` (outer loop). The setting of a random `seed` value ensures reproducibility among fold assignments, which is desired when comparing several models. 
+-   `kfold()` - Randomly partitions the data into the prescribed number of folds (`k`)
+-   `cvFun()` - Re-fits a defined model to each of the folds defined by `kfold` and records the observed and predicted response values (inner loop), which can be repeated for a defined number of permutations,`nperm` (outer loop). The setting of a random `seed` value ensures reproducibility among fold assignments, which is desired when comparing several models.
 
 ```{r cvFuncions}
 # Determines k-fold partitions for a given number of samples
@@ -370,7 +384,6 @@ cvFun <- function(model = NULL, nperm = 10, k = 5, seed = 1){
 
 The following figure shows how the data samples in a 5-fold cross validation are randomly assigned to folds (colors) as validation data sets. For each fold, error is assessed based on the predicted (lines) versus observed (points) from a given fold.
 
-
 ```{r kfoldExample, echo=FALSE}
 fold <- kfold(n = nrow(dat), k = 5)
 df <- as.data.frame(do.call("cbind", fold))
@@ -420,19 +433,17 @@ p <- (p1 / p2) + plot_layout(design = layout, guides = "collect") &
 print(p)
 ```
 
-
 ### Influence of fold number on error
 
-The number of folds chosen depends on several considerations; such as the variance in the data, number of samples, and computational cost. A low k (e.g. 5-fold) typically provides a good balance for the types of models that we have looked at. The larger amount of validation data (20\%) provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold cross validation (i.e. multiple permutations) will further reduce variability in error estimation.
+The number of folds chosen depends on several considerations; such as the variance in the data, number of samples, and computational cost. A low k (e.g. 5-fold) typically provides a good balance for the types of models that we have looked at. The larger amount of validation data (20%) provides a robust measure of prediction error, and the low number of folds is not computationally costly. That said, performing repeated k-fold cross validation (i.e. multiple permutations) will further reduce variability in error estimation.
 
 The number of folds will influence the resulting metric of fit to the validation set. The more folds, the closer one gets to the error of the data, with a leave-one-out cross validation (*LOOCV*) being the least biased.
 
-In the following example, a simple linear model is evaluated by repeated k-fold cross validation. As the number of folds increases, the estimated error of the validation set approaches the true error. The vertical lines shows the distribution of error values from across the permutations (5\% and 95\% quantiles).
+In the following example, a simple linear model is evaluated by repeated k-fold cross validation. As the number of folds increases, the estimated error of the validation set approaches the true error. The vertical lines shows the distribution of error values from across the permutations (5% and 95% quantiles).
 
-Note that model error estimated by the fitting to the full data (based on residuals) tends to underestimate the true prediction error because it is calculated on the same data used to train the model. This bias can lead to overfitting, where the model appears to perform better on the training data than it would on unseen data. 
+Note that model error estimated by the fitting to the full data (based on residuals) tends to underestimate the true prediction error because it is calculated on the same data used to train the model. This bias can lead to overfitting, where the model appears to perform better on the training data than it would on unseen data.
 
-LOOCV provides a *nearly* unbiased estimate of the prediction error because each data point is excluded from the training set when its error is calculated. This does not mean that the underlying model couldn't still suffer from overfitting, and a larger \% holdout (e.g. 5- or 10-fold cross validation) is usually preferable.
-
+LOOCV provides a *nearly* unbiased estimate of the prediction error because each data point is excluded from the training set when its error is calculated. This does not mean that the underlying model couldn't still suffer from overfitting, and a larger % holdout (e.g. 5- or 10-fold cross validation) is usually preferable.
 
 ```{r kfoldErrorEst, echo=FALSE}
 n <- 20
@@ -524,20 +535,19 @@ In this case, the addition of the random intercept with an autoregressive struct
 
 # Automated model selection with machine learning
 
-Depending on the number of potential candidate models, as well as the complexity of the model fitting and cross validation procedures, model selection can become computationally costly. Thus, a brute force approach of evaluating all models variants with cross validation could be unrealistic. 
+Depending on the number of potential candidate models, as well as the complexity of the model fitting and cross validation procedures, model selection can become computationally costly. Thus, a brute force approach of evaluating all models variants with cross validation could be unrealistic.
 
-In the example by @kuhn_using_2021, a large number of candidate covariates (n = 82) were chosen based on hypothesized biological mechanisms affecting recruitment of North Sea cod. These included time series signals extracted from different environmental fields (e.g. principal components from temperature, salinity, and currents) and at different temporal periods (seasons and lags). 
+In the example by @kuhn_using_2021, a large number of candidate covariates (n = 82) were chosen based on hypothesized biological mechanisms affecting recruitment of North Sea cod. These included time series signals extracted from different environmental fields (e.g. principal components from temperature, salinity, and currents) and at different temporal periods (seasons and lags).
 
-The approach used an efficient search algorithm called *non-dominated sorting genetic algorithm* (NSGA-II), combined with cross validation, to explore the large number of potential model configurations (n = `r formatC(2^82, 3)`). 
+The approach used an efficient search algorithm called *non-dominated sorting genetic algorithm* (NSGA-II), combined with cross validation, to explore the large number of potential model configurations (n = `r formatC(2^82, 3)`).
 
 In the following example, we will explore a version of the approach using a simpler implementation of a genetic algorithm.
 
-
 ## Fitness function
 
-One starts with a *fitness function*, whose first argument is a binomial vector indicating which covariates to include (i.e. genes that are turned on/off) in the model. The output of the function should be a single value, which the algorithm will use to rank models, and decide which covariate s will contribute to new offspring combinations in the next generation. 
+One starts with a *fitness function*, whose first argument is a binomial vector indicating which covariates to include (i.e. genes that are turned on/off) in the model. The output of the function should be a single value, which the algorithm will use to rank models, and decide which covariate s will contribute to new offspring combinations in the next generation.
 
-In the following fitness function, a repeated k-fold cross validation is run, and the resulting fitness is a single value of mean absolute percent error (MAPE). When `fitnessOnly = FALSE`, the function will return additional information about the variability of MAPE among permutations, useful in final model selection discussed below (see **Pareto front**).
+In the following fitness function, a repeated k-fold cross validation is run, and the resulting fitness is a single value of mean absolute percent error (MAPE). When `fitnessOnly = FALSE`, the function will return additional information about the variability of MAPE among permutations, useful in final model selection discussed below (see **Pareto front** section below).
 
 ```{r fitnessFun}
 fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5, 
@@ -564,11 +574,9 @@ fitnessFun <- function(genes = NULL, data = NULL, nperm = 10, k = 5,
 }
 ```
 
-
 Let's create a starting population of model configurations to begin the search and visualize the initial fitness of the individuals (i.e. model configurations).
 
 It is advisable to start off with simplest models, involving 1 or 2 covariates, and let the algorithm search more complex models later.
-
 
 ```{r startPop}
 popSize <- max(30, length(envvars)) # number of individuals
@@ -605,8 +613,7 @@ ggplot(df_long, aes(x = variable, y = ind, fill = factor(value))) +
 
 Distribution of fitness for starting population:
 
-
-```{r}
+```{r fitnessStartPop}
 
 tmp1 <- apply(startPop, 1, FUN = function(x){fitnessFun(x, data = dat)})
 tmp2 <- apply(startPop, 1, FUN = function(x){paste(envvars[as.logical(x)], collapse = "+")})
@@ -628,9 +635,9 @@ Next, we will provide this starting population to a genetic algorithm (`GA::ga()
 
 > *Genetic algorithms (GAs) are stochastic search algorithms inspired by the basic principles of biological evolution and natural selection. GAs simulate the evolution of living organisms, where the fittest individuals dominate over the weaker ones, by mimicking the biological mechanisms of evolution, such as selection, crossover and mutation.*
 
-These aspects can be controlled by the `ga` function with specific arguments, e.g. the probability of gene crossover (`pcrossover`), the probability of mutation (`pmutation`), etc.
+These aspects can be controlled by the `ga` function with specific arguments, e.g. the probability of gene crossover (`pcrossover`), the probability of mutation (`pmutation`), etc. Evolutionary settings will affect how the parameter space is searched -- e.g. high mutation rates will be more likely to avoid getting trapped in local minima, while low mutation rates will provide a more refined search.
 
-Note that genetic algorithms ca also be useful for fitting other types of models (e.g. coefficient estimation), and are especially helpful in cases where the parameter space has local minima. Evolutionary settings will affect how the parameter space is searched --  e.g. high mutation rates will be more likely to avoid getting trapped in local minima, while low mutation rates will provide a more refined search. 
+Note that genetic algorithms can also be useful for fitting other types of models (e.g. coefficient estimation), and are especially helpful in cases where the parameter space has local minima.
 
 In the following example, a few non-standard options have been added: 1. A `postFitness` function is defined to maintain a record of all gene configurations tested, as well as their associated fitness, in order to visualize the full distribution of fitness by model complexity, and 2. Use of *memoisation*, which allows the algorithm to remember past evaluations of a particular model, so that fitness need not be recalculated in future evaluations. This can greatly reduce computation time for "binary-type" GA models.
 
@@ -677,16 +684,15 @@ tmp <- forget(mfitnessFun) # to stop memoisation
 plot(ga.fit) # plot fitness development
 ```
 
-Note that the best fitness model is identified relatively quickly, while the median and mean population fitness increases over time. 
+Note that the best fitness model is identified relatively quickly, while the median and mean population fitness increases over time.
 
 ## Pareto front
 
-We can now visualize the resulting fitness values and identify the best models by complexity. Of these best models, those that also show increased fitness in comparison to the neighboring simpler model (i.e. one fewer covariate) are determined to lie on the pareto front (dashed line in figure below). 
+We can now visualize the resulting fitness values and identify the best models by complexity. Of these best models, those that also show increased fitness in comparison to the neighboring simpler model (i.e. one fewer covariate) are determined to lie on the Pareto front (dashed line in figure below).
 
-A general rule-of-thumb, the *1 Standard Error Rule* [@hastie_elements_2017], states that one shouoldselect the simplest model within one standard error of the best performance estimate. The idea is that if a simpler model performs nearly as well as a more complex one (within the margin of error), the simpler model is preferable. 
+A general rule-of-thumb, the *1 Standard Error Rule* [@hastie_elements_2017], states that one shouold select the simplest model within one standard error of the best performance estimate. The idea is that if a simpler model performs nearly as well as a more complex one (within the margin of error), the simpler model is preferable.
 
-In the repeated k-fold approach here, we instead use the distribution of error metric values across permutations as a proxy for this uncertainty. Only when a more complex model has a fitness value larger than the upper quantile (95\%) of the simpler model, is it considered part of the pareto front. 
-
+In the repeated k-fold approach here, we instead use the distribution of error metric values across permutations as a proxy for this uncertainty. Only when a more complex model has a fitness value larger than the upper quantile (95%) of the simpler model, is it considered part of the Pareto front.
 
 ```{r paretoFront}
 .pop$nVar <- rowSums(.pop[,seq(envvars)])
@@ -744,17 +750,15 @@ ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) +
 -   Memoisation evaluated `r nrow(unique(.pop[,seq(envvars)]))` unique models, saving us `r paste0(round((1-(nrow(unique(.pop[,seq(envvars)]))/nrow(.pop)))*100), "%")` of fitness evaluations.
 -   Only `r nrow(unique(.pop[,seq(envvars)]))` model configurations out of a total possible `r 2^length(envvars)-1` were evaluated (`r paste0(round(nrow(unique(.pop[,seq(envvars)]))/(2^length(envvars)-1)*100), "%")`).
 
-In this case, the best model is indeed the correct model, but it is only marginally better than the one containing only the environmental covariate "x01". The three term model is not part of the pareto front as its solution is within the margin of error from the simpler 2-term model. 
-
-
+In this case, the best model is indeed the correct model, but it is only marginally better than the one containing only the environmental covariate "x01". The three term model is not part of the Pareto front as its solution is within the margin of error from the simpler 2-term model.
 
 # Other cross validation considerations
 
 ## Flavor 2: Fold blocking
 
-Until now, we have defined folds randomly. However, spatial or temporal autocorrelation may result in overly optimistic predictions is folds are not selected appropriately. 
+Until now, we have defined folds randomly. However, spatial or temporal autocorrelation may result in overly optimistic predictions if folds are not selected carefully.
 
-For these cases, folds should be defined at scales that are larger than the potential residual autocorrelation. 
+For these cases, folds should be defined at scales that are larger than the residual autocorrelation.
 
 In our example data, there is autocorrelation evident in the response variable recruitment.
 
@@ -762,17 +766,16 @@ In our example data, there is autocorrelation evident in the response variable r
 acf(dat$rec)
 ```
 
-But, this is largely explained by the covariates considered (e.g. fluctuations in SSB), as indicated by an examination of autocorrelation in the residuals.  
+But, this is largely explained by the covariates considered (e.g. fluctuations in SSB), as indicated by an examination of autocorrelation in the residuals.
 
 ```{r}
 fitRicker <- glm(rec ~ offset(log(ssb)) + ssb, data = dat, gaussian(link = "log"))
 acf(resid(fitRicker))
 ```
 
-When this is not the case, a blocking strategy could be used for the folds. 
+When this is not the case, a blocking strategy could be used for the folds.
 
-In the example below, a minimum block size is defined, and the data is divided accordingly. 
-
+In the example below, a minimum block size is defined, corresponding to the scale where autocorrelation is no longer significant, and the data is divided accordingly.
 
 ```{r randomBlocks, echo=FALSE}
 minSize <- 6
@@ -836,23 +839,21 @@ print(p)
 
 ```
 
-There are indeed some folds of data that lie almost completely above/below the fitted Ricker models, and this type of set-up to test predictions performance across these temporal scales. 
-
-
-
+There are indeed some folds of data that lie almost completely above/below the fitted Ricker models, but the above estimation of autocorrelation states that this was not significant.
 
 ## Flavor 3: Hindcasting
 
-When future prediction performance is the focus, you may want to select the validation data more carefully to prevent the model from "*seeing*" the future, which could potentially bias results. One strategy is to again fit the model to the *training* data set, but have two holdout sets of future data: 1. the *validation* set, used for model selection, and 2. the *testing* set for evaluating prediction performance after model selection. 
+When future prediction performance is the focus, you may want to select the validation data more carefully to prevent the model from "*seeing*" the future, which could potentially bias results.
 
-In addition to addressing effects of autocorrelation, the set-up may also test for prediction performance when the time series is non-stationary, or subject to drift. 
+One strategy is to again fit the model to the ***training*** data set, but have two holdout sets *of future data*: 1. a ***validation*** set, used for model selection, and 2. a ***testing*** set for evaluating prediction performance after model selection.
 
-The amount of data used as holdouts (both for the validation and testing sets) will depend on the desired prediction performance. As with k-fold cross validation, a good rule-of-thumb would be to hold out 10--20\% of the model selection data. This will hopefully deal with issues of overfitting, while also looking at future prediction performance in the validation set. 
+In addition to addressing effects of autocorrelation, the set-up may also test for prediction performance when the time series is non-stationary, or subject to drift.
 
-Another consideration is the forecast horizon of interest, which is a main consideration of the test data set size (e.g. a 3-year prediction might be of use for stock forecasts for defining catch advice levels). Thus, the length of both holdout sets should not differ too much, otherwise you may choose a model based on prediction at one time scale, while evaluating prediction performance at another. 
+The amount of data used as holdouts (both for the validation and testing sets) will depend on the desired prediction performance. As with k-fold cross validation, a good rule-of-thumb would be to hold out 10--20% of the model selection data. This will hopefully deal with issues of overfitting, while also looking at future prediction performance in the validation set.
 
-Finally, the prediction performance on the test set is often compared to a *naive* prediction (e.g. mean of recent values). The *MASE* metric compares the ratio of mean absolute error of the selected model to that of the naive model ($MAE_{mod}/MAE_{naive}$), with a score < 1.0 being a superior forecast model.
+Another consideration is the forecast horizon of interest, which is a main consideration of the test data set size (e.g. a 3-year prediction might be of use for stock forecasts for defining catch advice levels). Thus, the length of both holdout sets should not differ too much, otherwise you may choose a model based on prediction at one time scale, while evaluating prediction performance at another.
 
+Finally, the prediction performance on the test set is often compared to a *naive* prediction (e.g. mean of recent values). The *MASE* metric compares the ratio of mean absolute error of the selected model to that of the naive model ($MAE_{mod}/MAE_{naive}$), with a score \< 1.0 being associated with a forecast model that is superior to the naive one.
 
 ```{r testHoldout, echo=FALSE, fig.height=2}
 n <- nrow(dat) # length of time series
@@ -872,14 +873,9 @@ ggplot(df) + aes(x = t, y = 0, col = split) +
   theme_bw()
 ```
 
-
-
-
-
 ### Model selection on training/validation data
 
 In our example, since no strong autocorrelation was detected, lets try a k-fold approach for the model selection, leaving out the final 5 years of the data for MASE evaluation versus a naive model.
-
 
 ```{r kfoldHindcast, echo=FALSE, fig.height=2}
 n <- nrow(dat) # length of time series
@@ -910,7 +906,6 @@ ggplot(df) + aes(x = t, y = fold, color = split) +
   scale_y_reverse() + 
   theme_bw()
 ```
-
 
 ```{r hindcast}
 # split data into training/validation & testing
@@ -986,18 +981,13 @@ ggplot(.pop) + aes(x = -fitness, y = fracVar, color = iter) +
 
 ```
 
-
-
-
 ### Prediction of test data and comparison to naive model
-
-The best model is `r best`, which we will then fit again to the full training/validation data, and predict the testing holdout. The naive model prediction will be the geometric mean of recruitment from the last 10 years.
 
 Note that the removal of the terminal 5 years already affected the definition of the best performing model, removing the term that was only marginally significant in the previous example ("x03").
 
-The selected model is refit to the entire training/validation data set, and prediction is made to the test set. Here the prediction performance is presented relative to that of a naive model (MASE) to evaluate potential gains.
+The best selected model is `r best`, which we will then re-fit to the full training/validation data, and predict the testing holdout. The naive model prediction will be the geometric mean of recruitment from the last 10 years.
 
-For comparison, the MASE of predictions with the simple Ricker without environmental covariates is also shown for comparison.
+For comparison, the MASE of the simple Ricker, without environmental covariates, is also shown for comparison.
 
 ```{r naiveCompare}
 # naive prediction (geometric mean of last 10 years)
@@ -1047,20 +1037,19 @@ ggplot(df) + aes(x = t, y = rec, colour = type) +
 
 ```
 
-The prediction performance is slightly better than the naive prediction (MASE < 1.0), but this might not be strong enough to use in practice. 
+The prediction performance is slightly better than the naive prediction (MASE \< 1.0), but this might not be strong enough to warrant a change from the naive approach.
 
-The simple Ricker was in fact much better, with a substantially lower MASE. 
+The simple Ricker was in fact much better, with a substantially lower MASE.
 
-Also note that the stock recruitment models were given the correct future SSB and environmental covariates, which may not be possible (without some associated error in their predictions).
-
+Also note that the stock recruitment models were given the correct future SSB and environmental covariates, which may not be possible (without some associated error in their predictions). A fair test of prediction performance should also take into account this uncertainty.
 
 ### Sensitivity of prediction to data window
 
-The last example shows a slightly different version of hindcasting that is slowly being adopted in the selection of stock assessment models. In particular, how sensitive is the selected model to recent data. 
+The final example will show a slightly different version of hindcasting that is slowly being adopted in the selection of stock assessment models. In particular, this approach also tests how sensitive the model fit is the to recent data.
 
-The procedure involves the removal of recent data, e.g. one year at a time, known as a "peel". This is done for several time steps into the past, followed by a refitting of the model and a prediction into the future. 
+The procedure involves the removal of recent data one year at a time, known as a "peel". This is done for several time steps into the past, followed by a refitting of the model and prediction of future values.
 
-Two bits of insight can be gained: 1. the variation in the fitted values values, which is evaluated with a statistic called Mohn's Rho, and 2. the predictive performance on the future test values, which can again be assessed through a metric like MASE. 
+Two bits of insight can be gained: 1. whether retrospective bias exists in the fitted historical values – evaluated with a statistic called Mohn's Rho, and 2. the predictive performance on the future test values, which can again be assessed through a metric like MASE.
 
 ```{r hincastPeels, fig.width=7}
 nPeel <- 5
@@ -1083,8 +1072,8 @@ for(i in c(0,seq(nPeel))){
   datTrain.i$forecast[length(datTrain.i$forecast)] <- 0
   
   if(i>0){
-  datTest.i$type <- "Test"
-  datTest.i$forecast <- seq(nrow(datTest.i))
+    datTest.i$type <- "Test"
+    datTest.i$forecast <- seq(nrow(datTest.i))
   }
   
   datPred <- rbind(datTrain.i, datTest.i)
@@ -1157,17 +1146,12 @@ print(p)
 
 ```
 
-
-
-
 # Concluding remarks
 
-For some SEAwise participants, these results illustrate important considerations for the use of environmentally-mediated models in management strategy evaluations:
+During the SEAwise project, similar results on the predictive power of environmentally-mediated models illustrated important considerations and trade-offs for their use in management strategy evaluations:
 
-- Their use in the management procedure, e.g. as part of a harvest control rule involving short-term forecasts, requires rigorous testing with realistic information on future environmental conditions, which is likely rare. 
-- Their use in the operating model, e.g. as part of the biological dynamics, can provide important tests to the robustness of a given mangement procedure over the long-term. 
-
-
+-   Their use in the **management procedure**, e.g. as part of a harvest control rule involving short-term forecasts, requires rigorous testing with realistic information on future environmental conditions. Clear benefits over naive approaches may be rare.
+-   Their use in the **operating model**, e.g. as part of the biological dynamics, can provide important tests to the robustness of a given management procedure over the long-term. The ability of a given harvest control rule to produce favorable outcomes across several alternate (likely) operating models provides additional confidence in the procedure.
 
 # Software Versions
 
@@ -1187,7 +1171,6 @@ For some SEAwise participants, these results illustrate important considerations
 -   patchwork: `r packageVersion('patchwork')`
 -   tidyr: `r packageVersion('tidyr')`
 -   **Compiled**: `r format(Sys.Date(), '%Y-%b-%d')`
-
 
 # Author
 
