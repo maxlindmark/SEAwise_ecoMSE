@@ -301,7 +301,7 @@ mse <- run.sms.MSE(df.tmb, # parameters for assesment model
                    n.cores = 4, # Number of cores for multithread processing
                    nruns = nruns, # Number of simulated runs (should be at least 100 for a final model)
                    wd = wd, 
-                   seeds = 123) # Working directory to source functions (each parallel process runs a unique application of R)
+                   seeds = 1234) # Working directory to source functions (each parallel process runs a unique application of R)
 
 # Just an easy function to make everything into data frame 
 mse <- unlist_MSE(mse,nruns = nruns)
@@ -334,7 +334,7 @@ mse.env <- run.sms.MSE(df.env, # parameters for assesment model
                    n.cores = 4, # Number of cores for multithread processing
                    nruns = nruns, # Number of simulated runs (should be at least 100 for a final model)
                    wd = wd, # wd to source files 
-                   seeds = 123) # 
+                   seeds = 1234) # 
 
 mse.env <- unlist_MSE(mse.env,nruns = nruns)
 
@@ -356,7 +356,7 @@ Here are four points to consider
 
 -   How would you chose between the environmental SSR model and the base model?
 
--   What are some relevant MSEs to run, to
+-   What are some relevant MSEs to run
 
 -   Does the model fit differently to the two time series? 
 
