@@ -65,16 +65,22 @@ The explicit growth model we include here is a linear-mixed model fitted with `g
 
 In order to execute the code in this tutorial you should have the following packages installed:
 
--   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/), [earth](https://cran.r-project.org/web/packages/earth/), [cobs](https://cran.r-project.org/web/packages/cobs/), [basetheme](https://cran.r-project.org/web/packages/basetheme/)
+-   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/), [earth](https://cran.r-project.org/web/packages/earth/),
+[devtools](https://cran.r-project.org/web/packages/devtools/),
+[cobs](https://cran.r-project.org/web/packages/cobs/), [basetheme](https://cran.r-project.org/web/packages/basetheme/)
 -   FLR: [FLCore](https://flr-project.org/FLCore/), [FLFleet](https://flr-project.org/FLFleet/), [FLash](https://flr-project.org/FLash/), [FLAssess](https://flr-project.org/FLAssess/), [FLBEIA](https://flr-project.org/FLBEIA/), [ggplotFL](https://flr-project.org/ggplotFL/)
+
+> Note that in order for the growth model to work the specific version of `TMB` (1.9.11) and `glmmTMB` (1.1.9), which were used to fit the growth model, have to be installed. One could use the function `up2date` to update the growth model to be compatible with the newest TMB/glmmTMB-versions, but this lead to other problems down the line (quite high weight predictions,which I don`t know where they are coming from...) inside FLBEIA, which were even harder to debug. 
 
 ```{r Install packages,eval=FALSE}
 
 install.packages( c("FLCore", "FLFleet", "FLBEIA", "ggplotFL", 
                     "FLash", "FLAssess"), 
                   repos="http://flr-project.org/R")
-install.packages( c("glmmTMB","earth","basetheme"))
-
+install.packages( c("earth","basetheme","devtools"))
+# install specific TMB and glmmTMB versions, otherwise the growth-model will not work
+devtools::install_version("TMB", version = "1.9.11", repos = "http://cran.us.r-project.org")
+devtools::install_version("glmmTMB", version = "1.1.9", repos = "http://cran.us.r-project.org")
 ```
 
 ### 2.2 Download data
@@ -90,7 +96,14 @@ url = "https://figshare.com/ndownloader/files/50834880?private_link=fc89683a94c1
 # specify data to download
 fn <- "FLBEIA_MSE.zip" # 443mb
 # directory to store data (create data directory in the folder of each practical)
+# ensure that it is correctly downloaded in the right folder
+current.wd  = getwd()
+current.lst.folder = gsub("(.*/\\s*(.*$))", "\\2", current.wd)
+if(current.lst.folder == "FLBEIA_MSE"){
 fp <- "./"
+} else{
+  setwd("./FLBEIA_MSE")
+}
 
 # (increase timeout for larger files)
 options(timeout = max(300, getOption("timeout")))
@@ -103,6 +116,8 @@ download.file(url = url,file.path(fp,fn),mode = "wb")
 unzip(file.path(fp,fn),exdir = fp)
 # remove original zip-download
 unlink(file.path(fp,fn))
+# set back the wd
+setwd(current.wd)
 }
 ```
 
@@ -823,6 +838,10 @@ for(i in 1:nrow(model.lut)){
       # check if gFit is in the model.obj
       name_mod1 = name_mod[name_mod %in% "gFit"]
       mod.obj = get(name_mod1)
+      # glmmTMB models are fitted with an old glmmTMB (1.1.9) & TMB (1.9.11) version
+      # so it needs to be updated otherwise the following function will fail
+      # uncomment the following line of code if you have a different TMB/glmmTMB version
+      # mod.obj = up2date(mod.obj)
       # add other scaling parameters to the model object as vector
       name_scaling = name_mod[!(name_mod %in% "gFit")]
       scaling_pars = sapply(name_scaling,get)
@@ -830,6 +849,10 @@ for(i in 1:nrow(model.lut)){
       attributes(mod.obj)$scaling = scaling_pars
     } else{
       mod.obj = get(name_mod)
+      # glmmTMB models are fitted with an old glmmTMB (1.1.9) & TMB (1.9.11) version
+      # so it needs to be updated otherwise the following function will fail
+      # uncomment the following line of code if you have a different TMB/glmmTMB version
+      # mod.obj = up2date(mod.obj)
     }
     # add residual noise to the model-object
       resids = residuals(mod.obj)
@@ -963,7 +986,7 @@ The method presented here is more an ad-hoc correction based on interpolating th
           
           # define weight range to interpolate in 
           wt_new = seq(
-            0,abs(0.4 * max(tmp1$wt)) + max(tmp1$wt), # interpolate between 0 and 140% of max.value
+            0,abs(0.7 * max(tmp1$wt)) + max(tmp1$wt), # interpolate between 0 and 170% of max.value
             length.out = 500
           )
           

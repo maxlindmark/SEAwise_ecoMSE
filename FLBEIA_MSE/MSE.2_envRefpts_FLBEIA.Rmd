@@ -56,16 +56,22 @@ Now that we have modeled environmental influences on recruitment and growth of a
 
 In order to execute the code in this tutorial you should have the following packages installed:
 
--   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/), [earth](https://cran.r-project.org/web/packages/earth), [plyr](https://cran.r-project.org/web/packages/plyr), [stringr](https://cran.r-project.org/web/packages/stringr/), [reshape2](https://cran.r-project.org/web/packages/reshape2/), [ggplot2](https://cran.r-project.org/web/packages/ggplot2/), [ggdark](https://cran.r-project.org/web/packages/ggdark/), [patchwork](https://cran.r-project.org/web/packages/patchwork/)
+-   CRAN: [glmmTMB](https://cran.r-project.org/web/packages/glmmTMB/), [earth](https://cran.r-project.org/web/packages/earth), 
+[devtools](https://cran.r-project.org/web/packages/devtools),
+[plyr](https://cran.r-project.org/web/packages/plyr), [stringr](https://cran.r-project.org/web/packages/stringr/), [reshape2](https://cran.r-project.org/web/packages/reshape2/), [ggplot2](https://cran.r-project.org/web/packages/ggplot2/), [ggdark](https://cran.r-project.org/web/packages/ggdark/), [patchwork](https://cran.r-project.org/web/packages/patchwork/)
 -   FLR: [FLCore](https://flr-project.org/FLCore/), [FLFleet](https://flr-project.org/FLFleet/), [FLash](https://flr-project.org/FLash/), [FLAssess](https://flr-project.org/FLAssess/), [FLBEIA](https://flr-project.org/FLBEIA/)
+
+> Note that in order for the growth model to work the specific version of `TMB` (1.9.11) and `glmmTMB` (1.1.9), which were used to fit the growth model, have to be installed. One could use the function `up2date` to update the growth model to be compatible with the newest TMB/glmmTMB-versions, but this lead to other problems down the line (quite high weight predictions,which I don`t know where they are coming from...) inside FLBEIA, which were even harder to debug. 
 
 ```{r Install packages,eval=FALSE}
 install.packages( c("FLCore", "FLFleet", "FLBEIA",
                     "FLash", "FLAssess"), 
                   repos="http://flr-project.org/R")
-install.packages( c("plyr","stringr","reshape2","glmmTMB",
+install.packages( c("plyr","stringr","reshape2",
                     "ggplot2","ggdark","patchwork"))
-
+# install specific TMB and glmmTMB versions, otherwise the growth-model will not work
+devtools::install_version("TMB", version = "1.9.11", repos = "http://cran.us.r-project.org")
+devtools::install_version("glmmTMB", version = "1.1.9", repos = "http://cran.us.r-project.org")
 ```
 
 Load all the necessary packages:
@@ -98,7 +104,14 @@ url = "https://figshare.com/ndownloader/files/50834880?private_link=fc89683a94c1
 # specify data to download
 fn <- "FLBEIA_MSE.zip" # 443mb
 # directory to store data (create data directory in the folder of each practical)
+# ensure that it is correctly downloaded in the right folder
+current.wd  = getwd()
+current.lst.folder = gsub("(.*/\\s*(.*$))", "\\2", current.wd)
+if(current.lst.folder == "FLBEIA_MSE"){
 fp <- "./"
+} else{
+  setwd("./FLBEIA_MSE")
+}
 
 # (increase timeout for larger files)
 options(timeout = max(300, getOption("timeout")))
@@ -111,6 +124,8 @@ download.file(url = url,file.path(fp,fn),mode = "wb")
 unzip(file.path(fp,fn),exdir = fp)
 # remove original zip-download
 unlink(file.path(fp,fn))
+# set back the wd
+setwd(current.wd)
 }
 ```
 
