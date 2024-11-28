@@ -265,12 +265,23 @@ A specific procedure has to be carried out to install RGtk2:
 
 - from CRAN:
 ```R
-install.packages( c("plyr","stringr","reshape2","glmmTMB","cobs",
+install.packages( c("plyr","stringr","reshape2","cobs","devtools",
                     "earth","ggplot2","ggdark","basetheme","patchwork"))
+# install specific TMB and glmmTMB versions, otherwise the growth-model will not work
+devtools::install_version("TMB", version = "1.9.11", repos = "http://cran.us.r-project.org")
+devtools::install_version("glmmTMB", version = "1.1.9", repos = "http://cran.us.r-project.org")
 ```
+> Note: The growth model we want to put into FLBEIA was fitted with a specific version of `TMB` and `glmmTMB` and seems to be lacking compatibility with other versions. So ensure to install the older versions (TMB: 1.9.11/ glmmTMB: 1.1.9) for this to correctly work as `up2date`, which should ensure backward-compatibility, results in other issues, which I did not have time to debug (yet). 
+
+
 - from FLR:
 ```R
 install.packages( c("FLCore", "FLFleet", "FLBEIA",
                     "FLash", "FLAssess"), 
                   repos="http://flr-project.org/R")
 ```
+> Note: If the standard-installation of FLR-packages does not work (which is quite often the case), try to install the developer version from github (with e.g. `devtools::install_github("flr/FLCore")` and specify the specific FLR package after the backslash).
+
+
+
+
