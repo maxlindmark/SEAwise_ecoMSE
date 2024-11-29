@@ -1,0 +1,245 @@
+---
+title: "Fit TMB models to back-calculated length-at-age"
+author: "Max Lindmark"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+## Load packages
+
+```{r}
+#| warning: false
+
+dir <- here::here()
+
+library(tidyr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+theme_set(theme_bw())
+library(RTMB)
+library(doParallel)
+library(forcats)
+source(paste0(dir, "/growth/laaGrowthRTMB.R"))
+```
+
+## Read back-calculated length-at-age data
+
+```{r}
+#| warning: false
+
+# Read length-at-age data
+d <- read_csv("https://raw.githubusercontent.com/maxlindmark/perch-growth/master/data/clean/dat.csv") %>%
+  filter(
+    age_ring == "Y", # use only length-at-age by filtering on age_ring
+    !area %in% c("VN", "TH")
+  ) |>
+  rename(year = catch_year) |>
+  dplyr::select(-keep) |> 
+  mutate(sex = as.factor(sex),
+         sex = fct_recode(sex, "unknown" = "-9")
+         )
+
+
+# Overview of data
+d |>
+  summarise(n_areas = length(unique(area)),
+            n_individuals = length(unique(ID)),
+            n_years = length(unique(year)),
+            n_obs = n()) |> 
+  pivot_longer(everything())
+
+# Read temperature data
+t <- read_csv("https://raw.githubusercontent.com/maxlindmark/perch-growth/refs/heads/main/output/gam_predicted_temps.csv") |>
+  dplyr::select(-model)
+
+# Reorganize data to match the TMB examples. Note year here corresponds to catch-year! Not the back-calculated year, change that
+# Also, I use every data point (back-calculated length-at-age), meaning I use multiple points per individual. I could use also only length-at-capture, or perhaps better, include the individual as a random effect and fit on individual data (see commented-out version)
+d <- d |>
+  mutate(year = cohort + age_bc)
+
+# Annual average back-calculated sizes
+d_yr <- d |>
+  summarise(l = mean(length_mm), .by = c(year, age_bc, sex, area)) |>
+  rename(age = age_bc) |>
+  mutate(id = paste(year, sex, area, sep = ":"))
+
+dlist <- list()
+
+for (i in unique(d_yr$id)) {
+  
+  dsub <- d_yr |>
+    filter(id == i) |>
+    arrange(age) |>
+    mutate(
+      l2 = lead(l),
+      year2 = year + 1,
+      dt = 1,
+      cohort = year - age
+    ) |>
+    drop_na(l2)
+
+  dlist[[i]] <- dsub
+}
+
+d_yr <- bind_rows(dlist)
+
+# Left join in annual average temperature (by area)
+d_yr <- d_yr |> tidylog::left_join(t, by = c("area", "year"))
+
+# Scale temp
+d_yr$temp.s <- as.numeric(scale(d_yr$temp))
+
+
+
+# Individual-level growth increments: this takes 6 minutes!
+# d_id <- d |>
+#   rename(l = length_mm,
+#          age = age_bc)
+#
+# dlist <- list()
+#
+# tictoc::tic()
+# for(i in unique(d_id$ID)) {
+#
+#   dsub <- d_id |>
+#     # ID is catch_year, sample_nr, area, sex, age_catch and gear
+#     filter(ID == i) |>
+#     arrange(age) |>
+#     mutate(l2 = lead(l),
+#            year2 = year + 1,
+#            dt = 1) |>
+#     drop_na(l2) |>
+#     dplyr::select(-age_ring, -final_length, -gear, -age_catch)
+#
+#   dlist[[i]] <- dsub
+#
+# }
+# tictoc::toc()
+#
+# d_id <- bind_rows(dlist)
+#
+# # Left join in annual average temperature (by area)
+# d_id <- d_id |> tidylog::left_join(t, by = c("area", "year"))
+#
+# # Scale temp
+# d_id$temp.s <- as.numeric(scale(d_id$temp))
+```
+
+## Fit the mechanistic model
+
+```{r}
+#| warning: false
+#| eval: false
+
+# Try a gvbgf with formLinf = ~1 + ssb.s+ temp.s
+gFit <- fitlaa(dat.train = d_yr, formLinf = ~ 1 + temp.s, mod = "svbgf")
+
+# gFit$mod
+# gFit$opt$par
+
+# make predictions back on the observed data
+d_yr$predl2 <- predlaa(gFit, newdata = d_yr)
+
+# Error: 'x' is not a valid 'advector' (constructed using illegal operation?)
+```
+
+## Fit the LMM
+
+```{r}
+#| warning: false
+
+library(glmmTMB)
+
+d_yr <- d_yr |>
+  mutate(
+    w = 0.00912 * l^3.11,
+    w2 = 0.00912 * l2^3.11,
+    logw = log(w),
+    logw2 = log(w2),
+    cohortf = as.factor(cohort),
+    yearf = as.factor(year)
+  ) |> 
+  filter(age <= 6)
+
+# newdata |> 
+#   dplyr::summarise(n = length(unique(cohort)), .by = c(age, year)) |> 
+#   dplyr::distinct(n)
+# 
+# newdata |> 
+#   dplyr::filter(year == 1973 & age == 1) |> 
+#   as.data.frame()
+
+
+gFit1 <- glmmTMB(
+  # sex could perhaps interact with age and/or temp, some literature suggests that
+  logw2 ~ logw + age + temp.s + sex + area + (1|cohortf) + (1|yearf),
+  data = d_yr
+)
+
+# Plot
+t1 <- broom.mixed::tidy(gFit1, effects = "fixed", conf.int = TRUE)
+
+ggplot(subset(t1, term != "(Intercept)"),
+       aes(estimate, term, xmin = conf.low, xmax = conf.high)) +
+  geom_errorbarh(height = 0) +
+  geom_vline(xintercept = 0, lty = 2) +
+  geom_point() +
+  ylab(NULL)
+
+# Predict back on real data
+newdata = d_yr
+
+newdata$cohortf <- NA # omit RE to get mean predictions
+newdata$yearf <- NA # omit RE to get mean predictions
+
+newdata$predlogw2 <- predict(gFit1, newdata = newdata, allow.new.levels = TRUE) # predict size2
+tot.var <- as.numeric(VarCorr(gFit1)$cond$cohortf + VarCorr(gFit1)$cond$yearf + attr(VarCorr(gFit1)$cond, "sc")^2)
+
+# predict on real scale with all 3 variance components included
+newdata$predw2 <- exp(newdata$predlogw2 + tot.var / 2) # lognormal mean
+
+for(i in unique(newdata$area)){
+  
+  pd <- newdata |> filter(area == i)
+  
+  print(
+    ggplot(pd, aes(year + 1, w2, color = sex)) +
+      geom_point(alpha = 0.5) +
+      geom_line(data = pd, aes(y = predw2)) +
+      facet_wrap(~age, labeller = label_both, scales = "free_y") +
+      ylab("weight-at-age") +
+      ggtitle(i)
+    )
+  
+}
+
+for(i in unique(newdata$area)){
+  
+  pd <- newdata |> filter(area == i)
+  
+  print(
+    ggplot(pd, aes(w2, predw2)) +
+      geom_point(alpha = 0.25) +
+      geom_abline(intercept = 0, slope = 1) +
+      facet_wrap(~age, labeller = label_both, scale = "free") +
+      ggtitle(i)
+    )
+  
+}
+
+```
+
+
